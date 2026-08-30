@@ -904,12 +904,10 @@ impl Hours {
         if self.twentyfourseven {
             return true;
         }
-        let local = instant.as_offset_date_time() + time::Duration::seconds(i64::from(utc_offset_seconds));
-        let weekday = local.weekday().number_from_monday();
-        let Ok(now) = LocalTime::new(local.hour(), local.minute()) else {
-            return false;
-        };
-        self.regular_hours.iter().any(|r| r.weekday == weekday && now.is_within(r.period_begin, r.period_end))
+        let local = instant.local_parts(utc_offset_seconds);
+        self.regular_hours
+            .iter()
+            .any(|r| r.weekday == local.iso_weekday && local.time.is_within(r.period_begin, r.period_end))
     }
 }
 

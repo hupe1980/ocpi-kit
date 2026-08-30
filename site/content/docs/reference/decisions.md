@@ -33,8 +33,21 @@ constructor could see.
 not exact; `f64::to_string` prints the decimal the peer actually wrote. See
 [Numbers](@/docs/concepts/numbers.md).
 
-**`time` is fully wrapped.** `types::DateTime` exposes no `time` type in its public API, so the
-backend could be swapped — for `jiff`, say — without a breaking change.
+**`time` is fully wrapped.** `types::DateTime` exposes no `time` type in its public API — the
+conversions to and from `OffsetDateTime` are crate-private — so the backend could be swapped for
+`jiff` without that being a breaking change. Callers get whole seconds from `unix_timestamp()` and
+full precision through the RFC 3339 text.
+
+**A charging period is a total, not a curve, and the crate will not pretend otherwise.**
+`Cdr::period_spans()` closes the interval boundaries, which are unambiguous. Re-cutting those
+intervals onto a finer grid is an assumption the CDR does not carry and the specification declines
+to make, so it stays with the caller who has to record it. `Session` gets no equivalent: its final
+period has no end while the session runs, and the whole list is replaced on every PATCH. See
+[Reading a CDR](@/docs/concepts/reading-a-cdr.md).
+
+**`SignedData.url` is modelled as the `string(512)` the specification says, not as a `Url`.** It is
+the only URL-shaped field in OCPI that is not the `URL` type, which is `string(255)` — so modelling
+it as one rejects a conformant link. See [Spec errata](@/docs/reference/errata.md).
 
 ## Versions
 

@@ -68,16 +68,49 @@ impl DateTime {
     ///
     /// The number of fractional digits emitted is chosen to be the shortest that represents the
     /// value exactly: none, three, six or nine.
-    #[must_use]
-    pub fn from_utc(value: OffsetDateTime) -> Self {
+    ///
+    /// Crate-private for the same reason as
+    /// [`as_offset_date_time`](Self::as_offset_date_time): the backend stays swappable.
+    /// [`from_unix_timestamp`](Self::from_unix_timestamp), [`parse`](Self::parse) and
+    /// [`now`](Self::now) are the public constructors.
+    pub(crate) fn from_utc(value: OffsetDateTime) -> Self {
         let instant = value.to_offset(UtcOffset::UTC);
         Self { instant, frac_digits: shortest_frac_digits(instant.nanosecond()), canonical: true }
     }
 
-    /// The instant as an [`OffsetDateTime`] whose offset is UTC.
+    /// The wall clock this instant shows in a zone `offset_seconds` east of UTC.
+    ///
+    /// Every time-of-day and day-of-week rule in OCPI is written in a Location's local time —
+    /// tariff restrictions, opening hours — so reading one means converting first. The result is
+    /// in this crate's own [`LocalParts`](crate::types::LocalParts), so no date-time library
+    /// reaches the API.
+    ///
+    /// The offset has to come from somewhere: a `Location` carries an IANA `time_zone`, and
+    /// [`TimeZone`](crate::tariffs::TimeZone) resolves it against the zone database, which is
+    /// what a rule spanning a daylight-saving change needs.
+    ///
+    /// ```
+    /// use ocpi_kit::types::DateTime;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let instant: DateTime = "2024-01-15T23:30:00Z".parse()?;
+    /// let local = instant.local_parts(3600); // CET, UTC+1
+    /// assert_eq!(local.time.hour(), 0);
+    /// assert_eq!(local.date.day(), 16);
+    /// assert_eq!(local.iso_weekday, 2); // Tuesday
+    /// # Ok(())
+    /// # }
+    /// ```
     #[must_use]
-    pub const fn as_offset_date_time(self) -> OffsetDateTime {
-        self.instant
+    pub fn local_parts(self, offset_seconds: i32) -> crate::types::LocalParts {
+        let local = self.instant + time::Duration::seconds(i64::from(offset_seconds));
+        crate::types::LocalParts {
+            date: crate::types::LocalDate::from_date(local.date()),
+            // Hour and minute out of a real timestamp are always in range.
+            time: crate::types::LocalTime::new(local.hour(), local.minute())
+                .expect("an hour and minute from a timestamp are in range"),
+            iso_weekday: local.weekday().number_from_monday(),
+        }
     }
 
     /// Seconds since the Unix epoch.

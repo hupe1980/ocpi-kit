@@ -4,9 +4,9 @@ weight = 10
 description = "Add ocpi-kit to a Cargo project and choose the feature set your role needs."
 +++
 
-```toml
-[dependencies]
-ocpi-kit = "0.1"
+```console
+cargo add ocpi-kit
+cargo add ocpi-kit --features client,tariffs   # or whichever your role needs
 ```
 
 The default features are `v2_3_0`, `v2_2_1` and `transport` — enough to decode, validate and

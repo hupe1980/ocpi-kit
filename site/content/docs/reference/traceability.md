@@ -80,6 +80,33 @@ in the field, and a missing enum value is the same defect hidden deeper:
 Neither shows up in a fixture round-trip unless the specification happens to ship an example using
 that value, which for a 42-value enum it does not.
 
+### `field-shapes`
+
+```console
+$ cargo run -p xtask -- field-shapes
+=== OCPI 2.3.0 field shapes ===
+304 field(s) match the specification's cardinality and length
+…
+Every field's cardinality and length matches the specification's tables.
+```
+
+A property table has four columns. `spec-coverage` reads the name and `enum-coverage` reads the
+values; this reads the other two — the `Card.` marker (`1`, `?`, `*`, `+`) and the length in
+`CiString(36)`.
+
+Both decide behaviour. A field the table marks `?` and the crate makes required rejects a
+conformant peer's object outright; one marked `1` and modelled `Option` lets this crate emit an
+object missing a mandatory field. A length that is too small reports a conformant value as
+`TooLong` — and since outgoing validation is on by default, refuses to send it.
+
+`SignedData.url` is the case that motivated it: a `string(512)`, not the `string(255)` `URL` type,
+and modelling it as a `Url` made this crate reject a conformant link. See
+[Spec errata](@/docs/reference/errata.md).
+
+The crate's semantic aliases are resolved before comparing — `PartyId` *is* `CiString(3)` — and the
+alias table is itself checked against `src/types/ids.rs`, so a `PartyId` that quietly became a
+`CiString<4>` fails the run rather than silently excusing every `party_id` in the crate.
+
 ### `sync-fixtures`
 
 ```console
@@ -123,6 +150,6 @@ no type information, so a shared name would make it blind to a dead field on eit
 
 ## In CI
 
-`no-floats` and `dead-config` run on every push. `spec-coverage` and `enum-coverage` run whenever a
-spec checkout is present. `sync-fixtures` is a maintenance task — the fixtures it produces are
+`no-floats` and `dead-config` run on every push. `spec-coverage`, `enum-coverage` and
+`field-shapes` run whenever a spec checkout is present. `sync-fixtures` is a maintenance task — the fixtures it produces are
 committed, so `tests/fixtures.rs` runs everywhere.

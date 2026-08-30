@@ -61,7 +61,7 @@ pub use policy::{PricingPolicy, Quantisation};
 
 use core::fmt;
 
-use crate::types::DateTime;
+use crate::types::{DateTime, LocalParts};
 
 /// The IANA time zone a Location is in, which the local-time restrictions are expressed in.
 ///
@@ -117,14 +117,13 @@ impl TimeZone {
             .map_err(|e| PricingError::TimeZone(format!("{}: {e}", self.name)))
     }
 
-    /// `instant` as a wall-clock time in this zone.
+    /// The wall clock `instant` shows in this zone.
     ///
     /// # Errors
     ///
     /// Returns [`PricingError::TimeZone`] when the offset cannot be determined.
-    pub fn to_local(&self, instant: DateTime) -> Result<time::OffsetDateTime, PricingError> {
-        let offset = self.offset_seconds_at(instant)?;
-        Ok(instant.as_offset_date_time() + time::Duration::seconds(i64::from(offset)))
+    pub fn to_local(&self, instant: DateTime) -> Result<LocalParts, PricingError> {
+        Ok(instant.local_parts(self.offset_seconds_at(instant)?))
     }
 }
 

@@ -15,6 +15,12 @@ xtask — repository automation for ocpi-kit
                            enum it survives as `Custom(_)` and silently never matches a `match`.
                            With --check, exits non-zero when anything is missing. CI runs it.
 
+  field-shapes [--check]   Compare every field's cardinality (`1`, `?`, `*`, `+`) and declared
+                           length with the same property tables. A field the spec marks optional
+                           and the crate makes required rejects a conformant peer; a length that
+                           is too small reports a conformant value as TooLong and refuses to send
+                           it. With --check, exits non-zero on a mismatch. CI runs it.
+
   dead-config              Check that every public configuration field is read somewhere, not
                            merely assigned. A setting that does nothing is worse than a missing
                            feature: somebody sets it, believes the problem is handled, and ships.

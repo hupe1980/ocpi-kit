@@ -182,6 +182,15 @@ mod tests {
     }
 
     #[test]
+    fn a_step_size_of_zero_quantises_nothing_but_a_step_size_of_one_is_real() {
+        // The specification never describes `step_size: 0`, yet its own free-of-charge example
+        // writes it. Read as "no quantisation": there is no multiple of nothing to round up to.
+        assert_eq!(Quantisation::StepSize.apply(n("0.1152"), 0, 1000), n("0.1152"));
+        // `1` says something different — for ENERGY, billed per whole Wh.
+        assert_eq!(Quantisation::StepSize.apply(n("0.1152"), 1, 1000), n("0.116"));
+    }
+
+    #[test]
     fn disabling_quantisation_bills_the_measured_amount() {
         assert_eq!(Quantisation::None.apply(n("5.4"), 500, 1000), n("5.4"));
         let policy = PricingPolicy::default().without_step_size();

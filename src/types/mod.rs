@@ -36,10 +36,10 @@ pub use datetime::{DateTime, InvalidDateTime};
 pub use display_text::DisplayText;
 pub use extensions::Extensions;
 pub use ids::{
-    ContractId, CountryCode, CountryCodeExt, Currency, EvseId, EvseIdParts, InvalidPartyRef, PartyId,
-    PartyRef,
+    ContractId, ContractIdParts, CountryCode, CountryCodeExt, Currency, EvseId, EvseIdParts, InvalidPartyRef,
+    PartyId, PartyRef,
 };
-pub use local::{InvalidLocalDate, InvalidLocalTime, LocalDate, LocalTime};
+pub use local::{InvalidLocalDate, InvalidLocalTime, LocalDate, LocalParts, LocalTime};
 pub use number::{InvalidNumber, Number};
 pub use open_enum::UnknownVariant;
 pub use string::OcpiString;

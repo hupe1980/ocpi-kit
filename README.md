@@ -13,9 +13,8 @@ It is not only a set of types. `ocpi-kit` gives you the wire models for **OCPI 2
 2.1.1**, the transport envelope, an async client, an `axum` server, the pieces a **roaming hub**
 needs, an **auditable tariff engine**, and a CLI — behind cargo features, in one crate.
 
-```toml
-[dependencies]
-ocpi-kit = "0.1"
+```console
+cargo add ocpi-kit
 ```
 
 ## The four properties that decide quality
@@ -308,6 +307,7 @@ specification:
 ```console
 $ cargo run -p xtask -- spec-coverage --check   # every object's fields vs the spec's property tables
 $ cargo run -p xtask -- enum-coverage --check   # every enum's values vs the spec's value tables
+$ cargo run -p xtask -- field-shapes --check    # every field's cardinality and length
 $ cargo run -p xtask -- sync-fixtures           # re-import the spec's own JSON examples
 $ cargo run -p xtask -- no-floats               # the no-f64 guarantee
 $ cargo run -p xtask -- dead-config             # every setting does something
@@ -320,12 +320,16 @@ somebody sets it, believes the problem is handled, and ships.
 
 `spec-coverage` checks five releases — 2.3.0, 2.2.1, 2.1.1 and the `bookings` and `payments`
 branches, 275 object comparisons — and all of them match the property tables exactly.
-`enum-coverage` checks the same five releases' 159 enums, and all of them match their value tables
-exactly.
+`enum-coverage` checks the same five releases' 159 enums against their value tables, and
+`field-shapes` checks 1,385 field cardinalities and lengths. All of them match.
 
 ## How it is verified
 
 * **Field census** against the specification's own property tables, as above.
+* **Field-shape census** against the cardinality and length columns of the same tables. A field
+  the spec marks optional and the crate makes required rejects a conformant peer's object; a length
+  that is too small reports a conformant value as `TooLong` and, with outgoing validation on,
+  refuses to send it.
 * **Enum census** against the specification's own *value* tables. A field census says nothing about
   what may go in the field: a missing enum value stops a conformant peer's object decoding on a
   closed enum, and on an open one it survives in `Custom(_)`, fails nothing, and silently never
@@ -356,7 +360,7 @@ exactly.
   they say nothing about whether what comes out is legible.
 * **The conformance runner pointed at our own server**, so the two keep each other honest.
 
-516 tests across twelve targets. Clippy at `pedantic` with `-D warnings` under three feature sets,
+526 tests across twelve targets. Clippy at `pedantic` with `-D warnings` under three feature sets,
 every feature and every pair of layer features compiled, `cargo deny`, and benchmarks for what the
 guarantees cost:
 
@@ -371,11 +375,14 @@ numbers](https://hupe1980.github.io/ocpi-kit/docs/reference/verification/#what-t
 ## Documentation
 
 * [API documentation](https://docs.rs/ocpi-kit) — every item, with the spec anchor it implements
+* [Reading a CDR](https://hupe1980.github.io/ocpi-kit/docs/concepts/reading-a-cdr/) — period
+  boundaries, signed metering data, token identity and delivery latency
 * [The guide](https://hupe1980.github.io/ocpi-kit/docs/) — the protocol in brief, concepts,
   per-layer walkthroughs, [interop notes](https://hupe1980.github.io/ocpi-kit/docs/reference/interop/),
   [how this is verified](https://hupe1980.github.io/ocpi-kit/docs/reference/verification/), the
   [spec errata](https://hupe1980.github.io/ocpi-kit/docs/reference/errata/) and the
   [design decisions](https://hupe1980.github.io/ocpi-kit/docs/reference/decisions/) behind the crate
+* [CHANGELOG.md](CHANGELOG.md) — what changed in each release
 
 ## Minimum supported Rust version
 

@@ -229,6 +229,152 @@ impl EvseIdParts {
     }
 }
 
+/// The parts of an eMI3/IDACS **Contract ID** (eMAID), when it follows the recommended format.
+///
+/// > *Recommended to follow the specification for eMA ID from "E-mobility ID-codes: the purpose
+/// > of IDs, ID usage and ID format".*
+///
+/// The format is `<country><provider><instance>[<check>]`: two letters, three alphanumerics, nine
+/// alphanumerics, and an optional check character. A hyphen may separate all three positions —
+/// *"if the hyphenated representation is chosen, the separators must be set at all three
+/// places"* — and is for human reading only; the IDACS white paper advises against sending it
+/// between systems.
+///
+/// **This is what makes a whitelist match.** `contract_id` is a [`CiString`], so case already does
+/// not matter, but `DE-8AA-CA2B3C4D5-N` and `DE8AACA2B3C4D5N` are the same contract written two
+/// ways, and comparing the strings says they are not. [`normalise`](Self::normalise) folds both to
+/// one key.
+///
+/// Like [`EvseIdParts`], parsing is a query rather than a requirement: the format is *recommended*
+/// by OCPI, not mandated, so an id in any other shape returns `None` and the crate carries on.
+///
+/// # What this cannot tell you
+///
+/// The format has no marker to match on — it is *"two letters, then twelve or thirteen
+/// alphanumerics"* — so any id of that shape parses, including one that is not an eMAID at all.
+/// `some-internal-id` is fourteen characters once the hyphens go, and comes back as a contract in
+/// `SO` issued by provider `MEI`.
+///
+/// That costs a whitelist nothing, because [`normalise`](Self::normalise) is a *function*: the
+/// same id always folds to the same key, whether or not it was really an eMAID. It does mean
+/// [`party`](Self::party) is only meaningful for an id you already know follows the format. The
+/// instance conventionally begins with `C` — *"strongly recommended to use the type-ID C as first
+/// character"* — which is a useful signal, but a recommendation is not something this crate will
+/// reject a conformant id over.
+///
+/// ```
+/// use ocpi_kit::types::ContractIdParts;
+///
+/// let parts = ContractIdParts::parse("DE-8AA-CA2B3C4D5-N").unwrap();
+/// assert_eq!(parts.country_code, "DE");
+/// assert_eq!(parts.provider_id, "8AA");
+/// assert_eq!(parts.instance, "CA2B3C4D5");
+/// assert_eq!(parts.check_digit, Some('N'));
+///
+/// // The same contract, written three ways, folds to one key.
+/// let key = ContractIdParts::normalise("DE-8AA-CA2B3C4D5-N").unwrap();
+/// assert_eq!(key, "DE8AACA2B3C4D5N");
+/// assert_eq!(ContractIdParts::normalise("de8aaca2b3c4d5n").unwrap(), key);
+/// assert_eq!(ContractIdParts::normalise("DE*8AA*CA2B3C4D5*N").unwrap(), key);
+///
+/// // Anything not of that shape is `None`, and so is anything too short or too long.
+/// assert!(ContractIdParts::parse("DE8AA").is_none());
+/// assert!(ContractIdParts::parse("12-8AA-CA2B3C4D5-N").is_none()); // country is not letters
+/// ```
+///
+/// Spec: 2.3.0 §mod_cdrs_cdr_token_class, §mod_tokens_token_object
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContractIdParts {
+    /// The two-letter ISO 3166-1 alpha-2 country code of the provider.
+    pub country_code: String,
+    /// The three-character provider ID, assigned by the eMI3 group.
+    pub provider_id: String,
+    /// The nine-character instance, whose first character is conventionally `C`.
+    pub instance: String,
+    /// The check character, which the format marks optional.
+    pub check_digit: Option<char>,
+}
+
+impl ContractIdParts {
+    /// Parses an eMI3/IDACS contract ID, or returns `None` if `id` is in another shape.
+    ///
+    /// Both separators seen in the field are accepted — `-`, which the contract-ID format
+    /// specifies, and `*`, which the EVSE-ID format uses and which some platforms carry over.
+    #[must_use]
+    pub fn parse(id: &str) -> Option<Self> {
+        let stripped: String = id.chars().filter(|c| *c != '-' && *c != '*').collect();
+        // <2 country><3 provider><9 instance>[<1 check>]
+        if !(stripped.len() == 14 || stripped.len() == 15) {
+            return None;
+        }
+        if !stripped.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            return None;
+        }
+        if !stripped.as_bytes()[..2].iter().all(u8::is_ascii_alphabetic) {
+            return None;
+        }
+        Some(Self {
+            country_code: stripped[..2].to_owned(),
+            provider_id: stripped[2..5].to_owned(),
+            instance: stripped[5..14].to_owned(),
+            check_digit: stripped[14..].chars().next(),
+        })
+    }
+
+    /// The one key two spellings of the same contract share: upper case, no separators.
+    ///
+    /// This is the form to key a whitelist on. Returns `None` for an id that does not follow the
+    /// format, which a caller should treat as "not comparable" rather than as "no match" — an
+    /// eMSP is free to use its own scheme.
+    #[must_use]
+    pub fn normalise(id: &str) -> Option<String> {
+        Self::parse(id).map(|p| p.to_compact())
+    }
+
+    /// The provider that issued this contract, according to the ID.
+    ///
+    /// As with [`EvseIdParts::party`], this need not be the OCPI `party_id` that pushed the
+    /// object: *"The `party_id` and `country_code` given here have no direct link with the
+    /// eMI3/IDACS format EVSE IDs and Contract IDs."*
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidString`] if the parts are not valid `CiString`s, which cannot happen for
+    /// a value that came out of [`ContractIdParts::parse`].
+    pub fn party(&self) -> Result<PartyRef, InvalidString> {
+        PartyRef::new(self.country_code.clone(), self.provider_id.clone())
+    }
+
+    /// The ID with no separators and in upper case: `DE8AACA2B3C4D5N`.
+    ///
+    /// > *Companies are strongly advised NOT to use the optional separators between IT systems as
+    /// > they are meant for visibility only.*
+    #[must_use]
+    pub fn to_compact(&self) -> String {
+        let mut out = String::with_capacity(15);
+        out.push_str(&self.country_code);
+        out.push_str(&self.provider_id);
+        out.push_str(&self.instance);
+        if let Some(check) = self.check_digit {
+            out.push(check);
+        }
+        out.make_ascii_uppercase();
+        out
+    }
+
+    /// The ID in the hyphenated form a human reads: `DE-8AA-CA2B3C4D5-N`.
+    #[must_use]
+    pub fn to_separated(&self) -> String {
+        let compact = self.to_compact();
+        let mut out = format!("{}-{}-{}", &compact[..2], &compact[2..5], &compact[5..14]);
+        if let Some(check) = compact[14..].chars().next() {
+            out.push('-');
+            out.push(check);
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

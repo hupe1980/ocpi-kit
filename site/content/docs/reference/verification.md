@@ -4,7 +4,7 @@ weight = 10
 description = "Field census, fixture round-trips, property tests, misbehaving mock peers, and what the guarantees cost."
 +++
 
-Nine techniques, each catching a class of problem the others cannot.
+Ten techniques, each catching a class of problem the others cannot.
 
 ## Field census against the specification's tables
 
@@ -25,7 +25,8 @@ A field one release adds to an object another release also defines is declared i
 
 ## Enum census against the specification's value tables
 
-`cargo run -p xtask -- enum-coverage --check` does the same thing one level down: the **values** of
+`cargo run -p xtask -- enum-coverage --check
+cargo run -p xtask -- field-shapes --check` does the same thing one level down: the **values** of
 every enum, against the tables that define them.
 
 ```text
@@ -42,6 +43,24 @@ decoding; on an open one the value survives in `Custom(_)`, fails nothing, and s
 matches the variant somebody wrote a `match` arm for. A fixture round-trip cannot find it unless
 the specification happens to ship an example using that value, which for a 42-value enum it does
 not.
+
+## Field-shape census against the same tables
+
+`cargo run -p xtask -- field-shapes --check` reads the two columns the other two censuses do not:
+the cardinality marker and the declared length.
+
+```text
+=== OCPI 2.3.0 field shapes ===   304 field(s) match
+=== OCPI 2.2.1 field shapes ===   249
+=== OCPI 2.1.1 field shapes ===   145
+=== bookings branch ===           377
+=== payments branch ===           310
+```
+
+A field the table marks `?` and the crate makes required rejects a conformant peer's object; one
+marked `1` and modelled `Option` lets this crate emit an object missing a mandatory field. A length
+that is too small reports a conformant value as `TooLong` and, with outgoing validation on, refuses
+to send it — which is what `SignedData.url` did before this check existed.
 
 ## Round-trip of every example the specification ships
 
@@ -182,7 +201,7 @@ other honest.
 
 ## Everything else
 
-516 tests across twelve targets, under three feature sets on three platforms.
+526 tests across twelve targets, under three feature sets on three platforms.
 
 * Clippy at `pedantic` with `-D warnings`, under three feature sets.
 * Every feature, and every pair of layer features, compiled — this is what catches a layer using a

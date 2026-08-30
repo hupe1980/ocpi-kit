@@ -627,11 +627,9 @@ impl RestrictionContext {
     fn build(session: &PricedSession, index: usize, period: &PricedPeriod) -> Result<Self, PricingError> {
         let local = session.time_zone.to_local(period.start)?;
         Ok(Self {
-            local_time: LocalTime::new(local.hour(), local.minute())
-                .map_err(|e| PricingError::TimeZone(e.to_string()))?,
-            local_date: LocalDate::from_date(local.date()),
-            weekday: DayOfWeek::from_iso_number(local.weekday().number_from_monday())
-                .unwrap_or(DayOfWeek::Monday),
+            local_time: local.time,
+            local_date: local.date,
+            weekday: DayOfWeek::from_iso_number(local.iso_weekday).unwrap_or(DayOfWeek::Monday),
             energy_so_far: session.energy_before(index),
             duration_so_far_seconds: session.duration_before(index),
             current_lower: period.current_for_lower_bound(),
@@ -664,11 +662,9 @@ impl RestrictionContext {
         }
         let local = session.time_zone.to_local(last_instant)?;
         Ok(Some(Self {
-            local_time: LocalTime::new(local.hour(), local.minute())
-                .map_err(|e| PricingError::TimeZone(e.to_string()))?,
-            local_date: LocalDate::from_date(local.date()),
-            weekday: DayOfWeek::from_iso_number(local.weekday().number_from_monday())
-                .unwrap_or(DayOfWeek::Monday),
+            local_time: local.time,
+            local_date: local.date,
+            weekday: DayOfWeek::from_iso_number(local.iso_weekday).unwrap_or(DayOfWeek::Monday),
             // By the end of the period, everything it consumed has been consumed.
             energy_so_far: session.energy_before(index) + period.energy_kwh,
             duration_so_far_seconds: last_instant.unix_timestamp() - session.start.unix_timestamp(),

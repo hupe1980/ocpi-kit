@@ -198,24 +198,9 @@ impl LocalDate {
         self.day
     }
 
-    /// The date as a [`time::Date`].
-    ///
-    /// # Panics
-    ///
-    /// Never: the constructor already proved the date exists.
-    #[must_use]
-    pub fn to_date(self) -> time::Date {
-        time::Date::from_calendar_date(
-            self.year,
-            time::Month::try_from(self.month).expect("checked in constructor"),
-            self.day,
-        )
-        .expect("checked in constructor")
-    }
-
     /// Builds a `LocalDate` from a [`time::Date`].
     #[must_use]
-    pub fn from_date(date: time::Date) -> Self {
+    pub(crate) fn from_date(date: time::Date) -> Self {
         Self { year: date.year(), month: u8::from(date.month()), day: date.day() }
     }
 }
@@ -285,6 +270,25 @@ impl schemars::JsonSchema for LocalDate {
     fn json_schema(_g: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({ "type": "string", "format": "date", "maxLength": 10 })
     }
+}
+
+/// A wall-clock reading: the date, the time of day, and the day of the week.
+///
+/// What an OCPI restriction is written against. `start_time`, `end_time` and `day_of_week` are all
+/// *"in local time, the time zone is defined in the `time_zone` field of the Location"*, so a
+/// consumer needs the instant converted, not the instant.
+///
+/// Produced by [`TimeZone::to_local`](crate::tariffs::TimeZone::to_local). The fields are this
+/// crate's own types, so no date-time library appears in the API and the backend stays
+/// replaceable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LocalParts {
+    /// The local calendar date.
+    pub date: LocalDate,
+    /// The local time of day, to the minute.
+    pub time: LocalTime,
+    /// The ISO-8601 day of the week: Monday is 1, Sunday is 7.
+    pub iso_weekday: u8,
 }
 
 #[cfg(test)]

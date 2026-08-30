@@ -6,7 +6,7 @@ default-members = ["."]
 
 [package]
 name = "ocpi-kit"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.96"
 description = "OCPI (Open Charge Point Interface) toolkit for EV roaming: spec-exact typed models for OCPI 2.3.0 / 2.2.1 / 2.1.1, transport envelope, client, server and hub building blocks, and an auditable tariff engine."

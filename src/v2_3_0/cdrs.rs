@@ -15,7 +15,7 @@ use crate::ocpi_enum;
 use crate::types::validate_fields;
 use crate::types::{
     CiString, ContractId, CountryCode, Currency, DateTime, EvseId, Extensions, Number, OcpiString, PartyId,
-    PartyRef, Url, Validate, Validator, ViolationCode,
+    PartyRef, Validate, Validator, ViolationCode,
 };
 
 use super::locations::{ConnectorFormat, ConnectorType, GeoLocation, PowerType};
@@ -165,6 +165,79 @@ impl Cdr {
             .filter(|d| d.dimension_type == dimension)
             .map(|d| d.volume)
             .sum()
+    }
+
+    /// Every charging period with the interval it actually covers.
+    ///
+    /// A [`ChargingPeriod`] carries only its `start_date_time`: *"A period ends when the next one
+    /// starts"*, and the last one ends at the CDR's `end_date_time`. Deriving that is three lines
+    /// and an off-by-one, and every consumer that needs energy over time writes it.
+    ///
+    /// ```
+    /// # use ocpi_kit::v2_3_0::cdrs::{Cdr, CdrDimensionType};
+    /// # fn f(cdr: &Cdr) {
+    /// for span in cdr.period_spans() {
+    ///     if let Some(kwh) = span.volume(CdrDimensionType::Energy) {
+    ///         println!("{} → {}: {kwh} kWh", span.start, span.end);
+    ///     }
+    /// }
+    /// # }
+    /// ```
+    ///
+    /// # What a period is, and is not
+    ///
+    /// A period is a **total, not a curve**. It says 4.3 kWh flowed between two instants and
+    /// nothing about how. Re-cutting these intervals onto a finer grid — quarter hours, say —
+    /// therefore needs an assumption the CDR does not carry, and the specification declines to
+    /// make it: it puts the obligation on the CPO to start a new period *"every moment/event that
+    /// has relevance for the total costs"* instead. Apportioning by elapsed time is the usual
+    /// choice and is usually close, but it is the caller's assumption to make and to record, not
+    /// this crate's to hide. [`tariffs`](crate::tariffs) takes the same position, and reports a
+    /// `PeriodSpansPriceChange` note when a period outlasts the price that governs it.
+    ///
+    /// Periods are yielded in the order the CDR gives them. `validate()` reports a CDR whose
+    /// periods are out of order, so check that first if the ordering matters — which for an
+    /// interval it does.
+    ///
+    /// # Only on a CDR
+    ///
+    /// [`Session`](crate::v2_3_0::sessions::Session) carries the same periods and does not get
+    /// this, on purpose. A running session has no `end_date_time`, so its final period has no
+    /// honest end; and its whole list is provisional — *"any `charging_periods` from the existing
+    /// object SHALL be replaced by the `charging_periods` from the newly received Session
+    /// object"*. A CDR is the record that stops changing, which is what an interval needs.
+    ///
+    /// Spec: 2.3.0 §mod_cdrs_chargingperiod_class
+    pub fn period_spans(&self) -> impl Iterator<Item = PeriodSpan<'_>> {
+        self.charging_periods.iter().enumerate().map(move |(i, period)| PeriodSpan {
+            start: period.start_date_time,
+            end: self.charging_periods.get(i + 1).map_or(self.end_date_time, |next| next.start_date_time),
+            period,
+        })
+    }
+
+    /// How long after the session ended this CDR was written, in seconds.
+    ///
+    /// A CDR may arrive well after the session it records, and a consumer with a filing deadline
+    /// needs to know by how much. `last_updated` is the moment to measure from because a CDR has
+    /// no later one: *"Because a CDR is for billing purposes, it cannot be changed or replaced
+    /// once sent to the eMSP. Changes are simply not allowed."* So on a CDR — unlike every other
+    /// OCPI object — `last_updated` is when it was created.
+    ///
+    /// `None` when the CDR carries the `1970-1-1T00:00:00Z` placeholder timestamps the
+    /// specification permits, which would otherwise report half a century of latency and poison
+    /// an average. See [`has_placeholder_timestamps`](Self::has_placeholder_timestamps).
+    ///
+    /// Negative values are returned as they are. They mean the CPO's clock disagrees with the
+    /// session it recorded, which is worth seeing rather than clamping away.
+    ///
+    /// Spec: 2.3.0 §mod_cdrs_cdr_object
+    #[must_use]
+    pub fn delivery_latency_seconds(&self) -> Option<i64> {
+        if self.has_placeholder_timestamps() {
+            return None;
+        }
+        Some(self.last_updated.unix_timestamp() - self.end_date_time.unix_timestamp())
     }
 
     /// Whether the timestamps are the `1970-1-1T00:00:00Z` placeholder the spec permits.
@@ -468,6 +541,33 @@ impl ChargingPeriod {
     }
 }
 
+/// A [`ChargingPeriod`] together with the interval it covers.
+///
+/// Produced by [`Cdr::period_spans`], which is where the boundary rule is explained.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PeriodSpan<'a> {
+    /// The period's own `start_date_time`.
+    pub start: DateTime,
+    /// The next period's start, or the CDR's `end_date_time` for the last one.
+    pub end: DateTime,
+    /// The period itself.
+    pub period: &'a ChargingPeriod,
+}
+
+impl PeriodSpan<'_> {
+    /// The volume recorded for one dimension in this period.
+    #[must_use]
+    pub fn volume(&self, dimension: CdrDimensionType) -> Option<Number> {
+        self.period.volume(dimension)
+    }
+
+    /// How long the interval is, in seconds. Negative if the CDR's periods are out of order.
+    #[must_use]
+    pub fn duration_seconds(&self) -> i64 {
+        self.end.unix_timestamp() - self.start.unix_timestamp()
+    }
+}
+
 impl Validate for ChargingPeriod {
     fn validate_in(&self, v: &mut Validator) {
         validate_fields!(self, v, start_date_time, dimensions, tariff_id);
@@ -617,12 +717,44 @@ pub struct SignedData {
     /// One or more signed values. Cardinality `+`.
     pub signed_values: Vec<SignedValue>,
     /// URL where an EV driver can check the signed data of a charging session.
+    ///
+    /// A `string(512)`, not the `URL` type every other URL-shaped field in OCPI uses — which is
+    /// `string(255)`. Modelling it as a [`Url`](crate::types::Url) would report a conformant
+    /// 300-character link as `TooLong` and refuse to construct one, so it is the string the
+    /// specification says it is. [`Url::new_lenient`](crate::types::Url::new_lenient) turns it
+    /// into one when a caller wants that.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<Url>,
+    pub url: Option<OcpiString<512>>,
     /// Undocumented JSON fields, preserved verbatim.
     #[serde(flatten, default, skip_serializing_if = "Extensions::is_empty")]
     #[builder(default)]
     pub extensions: Extensions,
+}
+
+impl SignedData {
+    /// The signed value recorded for one `nature`, compared case-insensitively.
+    ///
+    /// > *Possible values at moment of writing: Start, End, Intermediate. Others might be added
+    /// > later.*
+    ///
+    /// Open by design, so this takes a `&str` rather than an enum: a peer is free to record a
+    /// nature this crate has never heard of, and losing it would defeat the point of the object.
+    #[must_use]
+    pub fn value_for(&self, nature: &str) -> Option<&SignedValue> {
+        self.signed_values.iter().find(|v| v.nature.eq_ignore_case(nature))
+    }
+
+    /// The `Start` reading, if the CPO recorded one.
+    #[must_use]
+    pub fn start_value(&self) -> Option<&SignedValue> {
+        self.value_for("Start")
+    }
+
+    /// The `End` reading, if the CPO recorded one.
+    #[must_use]
+    pub fn end_value(&self) -> Option<&SignedValue> {
+        self.value_for("End")
+    }
 }
 
 impl Validate for SignedData {
@@ -654,6 +786,13 @@ pub struct SignedValue {
     /// NOTE: earlier releases of the OCPI 2.3.0 documentation mistakenly gave a maximum of 512.
     pub plain_data: OcpiString<5000>,
     /// Blob of signed data, base64 encoded.
+    ///
+    /// **Carried verbatim, whatever its length.** A signed record is evidence: it is worth
+    /// nothing if a byte moves, and an OCMF blob from a real meter routinely runs past the
+    /// `string(5000)` the specification gives. This crate's governing rule applies — the value
+    /// arrives intact and `validate()` reports the length as a
+    /// [`crate::types::ViolationCode::TooLong`] — so a decode and re-encode
+    /// round trip reproduces the original bytes exactly. `tests/fixtures.rs` asserts it.
     pub signed_data: OcpiString<5000>,
     /// Undocumented JSON fields, preserved verbatim.
     #[serde(flatten, default, skip_serializing_if = "Extensions::is_empty")]
@@ -772,6 +911,188 @@ impl CdrDimensionType {
             | Self::Time => "h",
             Self::StateOfCharge => "%",
         }
+    }
+}
+
+#[cfg(test)]
+mod cdr_helper_tests {
+    use super::*;
+
+    fn dt(s: &str) -> DateTime {
+        s.parse().expect("a valid timestamp")
+    }
+
+    fn period(start: &str, kwh: &str) -> ChargingPeriod {
+        ChargingPeriod::builder()
+            .start_date_time(dt(start))
+            .dimensions(vec![CdrDimension {
+                dimension_type: CdrDimensionType::Energy,
+                volume: kwh.parse().expect("a number"),
+                extensions: Extensions::new(),
+            }])
+            .build()
+    }
+
+    /// Built here rather than from `testkit`, which is a feature these tests must not require.
+    fn cdr_with(periods: Vec<ChargingPeriod>, end: &str, last_updated: &str) -> Cdr {
+        use crate::types::CiString;
+        let energy: Number = periods.iter().filter_map(|p| p.volume(CdrDimensionType::Energy)).sum();
+        Cdr::builder()
+            .country_code(CiString::new("NL").expect("valid"))
+            .party_id(CiString::new("TNM").expect("valid"))
+            .id(CiString::new("CDR1").expect("valid"))
+            .start_date_time(dt("2024-01-15T10:00:00Z"))
+            .end_date_time(dt(end))
+            .session_id(CiString::new("SESS1").expect("valid"))
+            .cdr_token(CdrToken {
+                country_code: CiString::new("DE").expect("valid"),
+                party_id: CiString::new("ABC").expect("valid"),
+                uid: CiString::new("012345678").expect("valid"),
+                token_type: TokenType::Rfid,
+                contract_id: CiString::new("DE8AACA2B3C4D5N").expect("valid"),
+                extensions: Extensions::new(),
+            })
+            .auth_method(AuthMethod::Whitelist)
+            .cdr_location(cdr_location())
+            .currency("EUR")
+            .charging_periods(periods)
+            .total_cost(crate::v2_3_0::types::Price::new("1.00".parse().expect("a number")))
+            .total_energy(energy)
+            .total_time("1".parse::<Number>().expect("a number"))
+            .last_updated(dt(last_updated))
+            .build()
+    }
+
+    fn cdr_location() -> CdrLocation {
+        use crate::types::CiString;
+        CdrLocation::builder()
+            .id(CiString::new("LOC1").expect("valid"))
+            .address("F.Rooseveltlaan 3A")
+            .city("Gent")
+            .country("BEL")
+            .coordinates(
+                crate::v2_3_0::locations::GeoLocation::new("3.729944", "51.047599")
+                    .expect("valid coordinates"),
+            )
+            .evse_uid(CiString::new("3256").expect("valid"))
+            .evse_id(CiString::new("BE*BEC*E041503001").expect("valid"))
+            .connector_id(CiString::new("1").expect("valid"))
+            .connector_standard(crate::v2_3_0::locations::ConnectorType::Iec62196T2)
+            .connector_format(crate::v2_3_0::locations::ConnectorFormat::Socket)
+            .connector_power_type(crate::v2_3_0::locations::PowerType::Ac3Phase)
+            .build()
+    }
+
+    /// A period ends where the next one starts, and the last one at the CDR's own end.
+    #[test]
+    fn a_period_span_runs_to_the_next_period_and_the_last_to_the_cdrs_end() {
+        let cdr = cdr_with(
+            vec![period("2024-01-15T10:00:00Z", "4.3"), period("2024-01-15T10:30:00Z", "1.1")],
+            "2024-01-15T11:00:00Z",
+            "2024-01-15T11:05:00Z",
+        );
+        let spans: Vec<_> = cdr.period_spans().collect();
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].end, dt("2024-01-15T10:30:00Z"), "the next period's start");
+        assert_eq!(spans[1].end, dt("2024-01-15T11:00:00Z"), "the CDR's end");
+        assert_eq!(spans[0].duration_seconds(), 1800);
+        assert_eq!(spans[1].duration_seconds(), 1800);
+        assert_eq!(spans[0].volume(CdrDimensionType::Energy).map(|v| v.to_string()), Some("4.3".into()));
+        assert!(spans[0].volume(CdrDimensionType::ParkingTime).is_none());
+
+        // The spans partition the session: they meet end-to-start and cover it exactly.
+        assert_eq!(spans[0].start, cdr.start_date_time);
+        assert_eq!(spans[0].end, spans[1].start);
+        assert_eq!(spans.last().expect("a span").end, cdr.end_date_time);
+    }
+
+    #[test]
+    fn a_single_period_spans_the_whole_session() {
+        let cdr = cdr_with(
+            vec![period("2024-01-15T10:00:00Z", "5.4")],
+            "2024-01-15T11:00:00Z",
+            "2024-01-15T11:00:00Z",
+        );
+        let spans: Vec<_> = cdr.period_spans().collect();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].duration_seconds(), 3600);
+    }
+
+    /// The latency a consumer with a filing deadline measures — and the one case that would
+    /// otherwise report half a century.
+    #[test]
+    fn delivery_latency_is_measured_from_last_updated_and_skips_placeholder_timestamps() {
+        let cdr = cdr_with(
+            vec![period("2024-01-15T10:00:00Z", "1")],
+            "2024-01-15T11:00:00Z",
+            "2024-01-17T09:00:00Z",
+        );
+        assert_eq!(cdr.delivery_latency_seconds(), Some(2 * 86_400 - 2 * 3600));
+
+        // "the CPO could send a CDR where the start_date_time and/or end_date_time are set to
+        //  1970-1-1T00:00:00Z" — a latency of 54 years is not a measurement.
+        let mut placeholder = cdr.clone();
+        placeholder.start_date_time = dt("1970-01-01T00:00:00Z");
+        placeholder.end_date_time = dt("1970-01-01T00:00:00Z");
+        assert!(placeholder.has_placeholder_timestamps());
+        assert_eq!(placeholder.delivery_latency_seconds(), None);
+
+        // A CPO whose clock disagrees with its own session is shown, not clamped.
+        let mut skewed = cdr;
+        skewed.last_updated = dt("2024-01-15T10:59:00Z");
+        assert_eq!(skewed.delivery_latency_seconds(), Some(-60));
+    }
+
+    /// The signed record is evidence: it survives a round trip byte for byte, over-length or not.
+    #[test]
+    fn an_over_length_signed_blob_survives_a_round_trip_exactly() {
+        // Real OCMF payloads run past the `string(5000)` the specification gives.
+        let blob = "O".repeat(6000);
+        let json = format!(r#"{{"nature":"End","plain_data":"{blob}","signed_data":"{blob}"}}"#);
+        let value: SignedValue = serde_json::from_str(&json).expect("decodes");
+        assert_eq!(value.signed_data.as_str(), blob, "not a byte moved");
+        assert_eq!(serde_json::to_string(&value).expect("encodes"), json, "and it goes back out the same");
+        assert_eq!(
+            value.validate().expect_err("the length is still reported").as_slice()[0].code,
+            crate::types::ViolationCode::TooLong,
+        );
+    }
+
+    /// `SignedData.url` is a `string(512)`, not the `string(255)` `URL` type.
+    ///
+    /// Modelled as a `Url` it reported a conformant link as `TooLong`, and — because
+    /// `ClientConfig::validate_outgoing` is on by default — a client could not send the CDR
+    /// carrying it.
+    #[test]
+    fn a_signed_data_url_may_run_past_the_length_of_an_ocpi_url() {
+        use crate::types::Validate;
+        let long = format!("https://e.com/{}", "a".repeat(300));
+        assert!(long.len() > 255 && long.len() <= 512);
+        let json = format!(
+            r#"{{"encoding_method":"OCMF","signed_values":[{{"nature":"End","plain_data":"p","signed_data":"s"}}],"url":"{long}"}}"#
+        );
+        let data: SignedData = serde_json::from_str(&json).expect("decodes");
+        assert_eq!(data.url.as_ref().expect("present").as_str(), long);
+        data.validate().expect("a 314-character signed-data URL is conformant");
+    }
+
+    #[test]
+    fn signed_values_are_reachable_by_nature() {
+        let value = |nature: &str| SignedValue {
+            nature: crate::types::CiString::new(nature).expect("valid"),
+            plain_data: crate::types::OcpiString::new_lenient("plain"),
+            signed_data: crate::types::OcpiString::new_lenient("signed"),
+            extensions: Extensions::new(),
+        };
+        let data = SignedData::builder()
+            .encoding_method(crate::types::CiString::<36>::new("OCMF").expect("valid"))
+            .signed_values(vec![value("Start"), value("End")])
+            .build();
+        assert!(data.start_value().is_some());
+        assert!(data.end_value().is_some());
+        // "Others might be added later", and the nature is a CiString.
+        assert!(data.value_for("end").is_some(), "natures compare case-insensitively");
+        assert!(data.value_for("Intermediate").is_none());
     }
 }
 

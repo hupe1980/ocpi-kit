@@ -6,9 +6,10 @@ description = "Places where the OCPI specification contradicts itself, and how o
 
 Places where the OCPI specification contradicts itself, and what `ocpi-kit` does about each.
 
-Every one is a test in
-[`tests/fixtures.rs`](https://github.com/hupe1980/ocpi-kit/blob/main/tests/fixtures.rs) marked
-`Expect::Erratum` with the reason, so if upstream fixes one the test fails and says to promote it.
+Every example below is a test in
+[`tests/fixtures.rs`](https://github.com/hupe1980/ocpi-kit/blob/main/tests/fixtures.rs) carrying its
+reason — `Expect::Erratum` where the example does not round-trip, `Expect::Tolerated` where this
+crate reads it anyway — so if upstream fixes one the test fails and says to promote it.
 
 ## In the specification's own examples
 
@@ -22,7 +23,6 @@ Every one is a test in
 | `location_example.json`, `location_example_parking_garage_opening_hours.json` (bookings branch) | Give `EVSE.parking` as a list of bare id strings, although the branch's *own* property table defines it as `EVSEParking*`, identically to core 2.3.0 |
 | `booking_example.json` (bookings branch) | Every `booking_requests[].booking_request` omits `booking_location_id`, which the BookingRequest table gives cardinality 1; and `party_id` is `INF12` where the table says `CiString(3)` |
 | `booking_location_example.json` (bookings branch) | `booking_option.evse_position` is a single string, but the BookingOption table gives it cardinality `*` — a list |
-| `tariff_5_free_of_charge.json` (2.3.0) | Uses `step_size: 0`, which the text nowhere describes. Read as "no quantisation" — a `step_size` of `1` *is* meaningful and is applied, because 1 Wh is a real unit |
 
 ## In the text
 
@@ -35,6 +35,7 @@ Every one is a test in
 | 2.3.0 `credentials` examples | No example shows `hub_party_id`, although the text mandates it for routing platforms | Our fixtures add one, marked non-spec |
 | `types.asciidoc` `string(N)` | Silent on whether `N` counts bytes or characters | This crate counts Unicode scalar values, and is lenient on ingest |
 | `mod_tariffs` | Explicitly states there are no rounding rules, and notes `step_size` is removed in OCPI 3.0 | Both are settings on `PricingPolicy` |
+| `mod_tariffs`, `step_size` of `0` | The text nowhere describes what a `step_size` of `0` means, yet the specification's own `tariff_5_free_of_charge.json` writes one | Read as "no quantisation": there is no multiple of nothing to round up to. A `step_size` of `1` is a different statement and *is* applied, because 1 Wh is a real unit |
 | `mod_cdrs`, Charging Periods | *"A CPO SHALL at least start (and add) a ChargingPeriod every moment/event that has relevance for the total costs of a CDR."* A period carries totals, not a curve, so one that outlasts its price cannot be apportioned after the fact — and every implementation silently prices it at the rate that applied when it began | This one prices it the same way, because there is nothing better to do with the data, and then **says so**: a `PeriodSpansPriceChange` note naming the dimension and the moment. See [Tariffs](@/docs/layers/tariffs.md) |
 | `mod_cdrs` `step_size`, `TIME` vs `PARKING_TIME` | The normative sentence is unconditional — *"In the cases that `TIME` and `PARKING_TIME` Tariff Elements are both used, `step_size` is only taken into account for the total parking duration"* — but the worked example beneath it justifies the same answer *sequentially*: *"the charging duration is not rounded up, as it is followed by another time based period."* The two part only on a session that parks and then charges | The sentence governs: `PARKING_TIME` absorbs the rounding whenever the session has any |
 | `mod_cdrs` / `mod_sessions`, period ordering | Neither says the Charging Periods must be in chronological order — yet `step_size` is defined in terms of *"the last relevant PriceComponent"*, and a period's duration is only knowable as the gap to the next one | Order and session bounds are validated in all three versions; the engine raises a `PeriodsOutOfOrder` note for an input built by hand rather than read off a CDR |
@@ -47,4 +48,5 @@ Every one is a test in
 | 2.1.1 `mod_locations`, `Hours` | *"Choice: one of two"* between `regular_hours` and `twentyfourseven`, which makes `twentyfourseven` **optional** in 2.1.1; OCPI 2.2 made it required without saying so | 2.1.1 gets its own `Hours` type with `twentyfourseven: Option<bool>` |
 | 2.3.0 `mod_tokens`, the `APP_USER` whitelist | *"The eMSP is RECOMMENDED to push Tokens with type `AD_HOC_USER` or `APP_USER` with `whitelist` set to `NEVER`."* That is a recommendation, not a constraint — and the specification's own `APP_USER` example uses `ALLOWED`, so validating against it would reject the spec's own document | `Validate` does not report it. `Token::follows_whitelist_recommendation()` answers the question for a caller who wants to ask it |
 | The `bookings` branch `Tariff` table | Lacks `preauthorize_amount`, which core 2.3.0 added after the branch forked | Declared in `xtask`'s `BRANCH_ONLY_FIELDS`, so the field census verifies it where it belongs and ignores it where it does not |
+| `mod_cdrs`, `SignedData.url` | Typed `string(512)` — not the `URL` type (`string(255)`) every other URL-shaped field in OCPI uses — and the row's cross-reference points at the **CiString** anchor while the text reads `string`, so the row does not agree with itself about case sensitivity either | Modelled as the `string(512)` the text says, so a conformant link past 255 characters is carried and validated as one. Case-sensitive, following the text rather than the cross-reference |
 | Payments, `POST .../terminals/activate` | *"The terminal_id is optional in the activation request"* — so the body is a `Terminal` that is not a valid `Terminal` | Typed as `Patch<Terminal>`, this crate's type for "an object with fields left out". It is **not** a merge patch: this is a `POST`, and the rule that a `PATCH` must carry `last_updated` deliberately does not apply |
