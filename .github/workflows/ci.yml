@@ -76,15 +76,22 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # No float may appear in a wire model or in the pricing engine. Reads src/ only.
       - run: cargo run -p xtask -- no-floats
-      # Every object's fields must still match the specification's own property tables. This
+      # Every public configuration field must be read somewhere, not merely assigned. A setting
+      # that does nothing is a promise the crate does not keep.
+      - run: cargo run -p xtask -- dead-config
+      # Every object's fields must still match the specification's own property tables, and
+      # every enum's values must still match its value table — a missing value on a closed enum
+      # makes a conformant peer's object undecodable, and on an open one it silently never
+      # matches. This
       # needs a checkout of the OCPI sources under specs/src/, which the repository does not
       # vendor (the specification is CC BY-ND); see site/content/docs/reference/traceability.md.
       - name: spec coverage
         run: |
           if [ -d specs/src ]; then
             cargo run -p xtask -- spec-coverage --check
+            cargo run -p xtask -- enum-coverage --check
           else
-            echo "::notice::specs/src/ is not present; run 'cargo run -p xtask -- spec-coverage --check' locally against an OCPI checkout"
+            echo "::notice::specs/src/ is not present; run 'cargo run -p xtask -- spec-coverage --check' and 'enum-coverage --check' locally against an OCPI checkout"
           fi
 
   msrv:

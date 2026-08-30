@@ -265,6 +265,107 @@ async fn a_crawl_follows_the_link_header_across_pages() {
     assert_eq!(ids, ["LOC1", "LOC2", "LOC3", "LOC4"], "the crawl follows rel=\"next\" to the end");
 }
 
+/// The conformance runner against a peer whose pagination filters do nothing.
+///
+/// Both failures are invisible in any single response: the objects are correct, the envelope is
+/// correct, and a client only finds out when a crawl never terminates or a nightly incremental
+/// pull takes six hours. They are exactly what a conformance run is for.
+#[tokio::test]
+async fn the_conformance_runner_catches_a_peer_that_ignores_offset_and_date_from() {
+    use ocpi_kit::client::{Conformance, Outcome};
+
+    let server = MockServer::start().await;
+    mount_discovery(&server).await;
+
+    // The same two objects for every query, whatever `offset` or `date_from` says.
+    let page = serde_json::to_value(vec![
+        sample::location("LOC1").expect("valid sample"),
+        sample::location("LOC2").expect("valid sample"),
+    ])
+    .expect("serialises");
+    Mock::given(method("GET"))
+        .and(path("/locations"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("X-Total-Count", "2")
+                .insert_header("X-Limit", "10")
+                .set_body_json(envelope(page)),
+        )
+        .mount(&server)
+        .await;
+
+    let report =
+        Conformance::new(base(&server).join("versions"), test_token("c")).run(client().transport()).await;
+
+    let outcome = |id: &str| report.checks.iter().find(|c| c.id == id).map(|c| c.outcome);
+    assert_eq!(outcome("module.offset"), Some(Outcome::Fail), "{report}");
+    assert_eq!(outcome("module.date_from"), Some(Outcome::Fail), "{report}");
+    assert!(
+        report.failures().any(|c| c.detail.contains("never terminate")),
+        "the offset finding should say what it costs:\n{report}"
+    );
+}
+
+#[tokio::test]
+async fn a_shrinking_result_set_rewinds_by_one_object_and_yields_no_duplicates() {
+    // "While crawling over the pages one of these objects is updated. The client detects this:
+    //  X-Total-Count will be lower in the next request. It is advised to redo the previous GET
+    //  with the `offset` lowered by 1 (if the `offset` was not 0) and after that continue
+    //  crawling the 'next' page links."
+    //
+    // The GET to redo is the one that saw the count drop, and its objects are discarded. Six
+    // objects, pages of two: the crawl takes A and B, then asks for offset 2 and is told the set
+    // is now five long — one object before its window is gone, so everything after it slid down
+    // by one and the object at the new offset 1 would be skipped. Redoing the *just-attempted*
+    // GET one lower picks it up. Rewinding to the previous page's offset instead would re-emit a
+    // whole page the caller has already seen, which is the bug this pins down.
+    let server = MockServer::start().await;
+    let page = |ids: &[&str]| {
+        serde_json::to_value(
+            ids.iter().map(|id| sample::location(id).expect("valid sample")).collect::<Vec<_>>(),
+        )
+        .expect("serialises")
+    };
+    let next = |offset: u32| format!("<{}/locations?offset={offset}&limit=2>; rel=\"next\"", server.uri());
+
+    let mount = async |offset: Option<&str>, total: &str, link: Option<String>, body| {
+        let mut template =
+            ResponseTemplate::new(200).insert_header("X-Total-Count", total).insert_header("X-Limit", "2");
+        if let Some(link) = link {
+            template = template.insert_header("Link", link);
+        }
+        let mock = Mock::given(method("GET")).and(path("/locations"));
+        let mock = match offset {
+            Some(offset) => mock.and(query_param("offset", offset)),
+            None => mock,
+        };
+        mock.respond_with(template.set_body_json(envelope(body))).mount(&server).await;
+    };
+
+    // The rewind target, and the page after it. Mounted first: `wiremock` takes the first mock
+    // that matches, and the catch-all below matches everything.
+    mount(Some("1"), "5", Some(next(3)), page(&["LOC3", "LOC4"])).await;
+    mount(Some("3"), "5", None, page(&["LOC5"])).await;
+    // The page that notices the shrink. Its objects are the ones that would have skipped LOC3.
+    mount(Some("2"), "5", Some(next(4)), page(&["LOC4", "LOC5"])).await;
+    // The first page, before anything changed.
+    mount(None, "6", Some(next(2)), page(&["LOC1", "LOC2"])).await;
+
+    let c = client();
+    let peer = locations_peer(&server);
+    let mut stream = peer
+        .locations(c.transport(), test_msp())
+        .list(PageQuery::new())
+        .expect("the peer implements Locations/SENDER");
+
+    let mut ids = Vec::new();
+    while let Some(location) = stream.next().await.expect("each page decodes") {
+        ids.push(location.id.as_str().to_owned());
+    }
+    assert_eq!(stream.corrections(), 1, "the shrink was noticed exactly once");
+    assert_eq!(ids, ["LOC1", "LOC2", "LOC3", "LOC4", "LOC5"], "nothing skipped, nothing repeated");
+}
+
 #[tokio::test]
 async fn a_peer_that_never_stops_offering_a_next_page_is_cut_off() {
     let server = MockServer::start().await;

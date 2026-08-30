@@ -25,5 +25,4 @@ target
 
 # Internal-only material (not part of the published crate)
 /specs/
-/CONCEPT.md
 .DS_Store

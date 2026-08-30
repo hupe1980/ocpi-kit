@@ -9,8 +9,16 @@
 //! |---|---|---|
 //! | another party | any | [`Direct`](crate::transport::RoutingScenario::Direct) — relay it |
 //! | the hub itself | `GET` on a Sender interface | [`GetAllViaHub`](crate::transport::RoutingScenario::GetAllViaHub) — merge every party's objects |
-//! | the hub itself | anything else | [`BroadcastPush`](crate::transport::RoutingScenario::BroadcastPush) — fan out to the opposite roles |
+//! | the hub itself | a write on a Receiver interface | [`BroadcastPush`](crate::transport::RoutingScenario::BroadcastPush) — fan out to the opposite roles |
 //! | nothing | any | [`OpenRoutingRequest`](crate::transport::RoutingScenario::OpenRoutingRequest) — decide from the content |
+//! | the hub itself | anything else | refused: [`OcpiError::NotRoutable`](crate::transport::OcpiError::NotRoutable), a `2001` |
+//!
+//! Addressing the hub is the one ambiguous case, and two of its four combinations are not
+//! scenarios at all: a `GET` on a Receiver interface is not a Broadcast Push, because *"GET SHALL
+//! NOT be used in combination with Broadcast Push"*, and a write on a Sender interface is neither
+//! a push to the connected parties nor a read to merge. Guessing the nearest scenario would mean
+//! a hub quietly broadcasting a read, so [`Forwardable::scenario`] refuses, with the advice the
+//! specification itself gives: omit the `OCPI-to-` headers and make it an Open Routing Request.
 //!
 //! # The rules the hub must not break
 //!
@@ -28,9 +36,17 @@
 //!
 //! # Version bridging
 //!
-//! A 2.2.1 CPO and a 2.3.0 eMSP can talk through a hub built on [`convert`](crate::convert),
-//! which reports what a translation cost rather than dropping it silently. [`bridge`] wires that
-//! into a forwarding decision.
+//! A 2.2.1 CPO and a 2.3.0 eMSP talk through the hub without either of them knowing: [`Forwarder`]
+//! translates the request body into the version the receiving platform speaks, translates the
+//! response back, and appends what the crossing cost to the `status_message` so the requesting
+//! party can see it. That is [`convert`](crate::convert) doing the work and
+//! [`Lossy`](crate::convert::Lossy) doing the reporting; no object is ever handed to a party in a
+//! version it did not ask for, and nothing is dropped silently.
+//!
+//! Only the 2.2.1 ↔ 2.3.0 crossing has conversions today. A message between two versions this
+//! build cannot translate is **refused** by default rather than relayed — see [`Unbridgeable`] for
+//! the reasoning and for how to relay it anyway. [`bridge`] exposes the same classification for a
+//! hub that wants to translate an object itself.
 //!
 //! Spec: 2.3.0 §transport_and_format_message_routing, §status_codes_4xxx_hub_errors
 
@@ -38,7 +54,7 @@ mod forwarder;
 mod routing_table;
 
 pub use forwarder::{
-    AggregatePolicy, BodyOwnerRouter, Forwardable, Forwarder, OpenRouter, Relayed, aggregate,
+    AggregatePolicy, BodyOwnerRouter, Forwardable, Forwarder, OpenRouter, Relayed, Unbridgeable, aggregate,
 };
 pub use routing_table::{ConnectedPlatform, RoutingTable};
 
@@ -56,11 +72,15 @@ pub enum Bridge {
     Upgrade,
     /// The receiver speaks an older version; downgrade, and report what did not fit.
     Downgrade,
-    /// One of the versions is not one this build models, so the object cannot be translated.
+    /// This build has no conversions between the two versions, so nothing can be translated.
     ///
-    /// Forwarding the bytes unchanged is still an option and is usually the right one — a hub
-    /// that refuses to relay a 3.0 message between two 3.0 parties is worse than useless — but
-    /// the decision belongs to the operator, so it is surfaced rather than assumed.
+    /// Today that is any crossing involving OCPI 2.1.1 — which has no owner fields, no routing
+    /// and no `Price`, so carrying an object across it is a decision about the deployment rather
+    /// than a translation — or a version this crate does not model at all.
+    ///
+    /// Relaying the bytes unchanged is still an option, and for two parties that understand each
+    /// other by some arrangement outside this crate it is the right one; the decision belongs to
+    /// the operator, so [`Forwarder`] takes it as [`Unbridgeable`] rather than assuming.
     Unsupported,
 }
 
@@ -80,7 +100,9 @@ pub fn bridge(sender: &VersionNumber, receiver: &VersionNumber) -> Bridge {
     if sender == receiver {
         return Bridge::Passthrough;
     }
-    if !sender.is_supported() || !receiver.is_supported() {
+    // Whether the *models* exist is not the question; whether the *conversions* do is. A build
+    // with `v2_1_1` on models 2.1.1 perfectly well and still cannot carry an object out of it.
+    if !crate::convert::wire::bridgeable(sender, receiver) {
         return Bridge::Unsupported;
     }
     if receiver.release_rank() > sender.release_rank() { Bridge::Upgrade } else { Bridge::Downgrade }
@@ -105,8 +127,12 @@ mod tests {
     }
 
     #[test]
-    fn an_unmodelled_version_is_surfaced_rather_than_guessed_at() {
+    fn a_crossing_with_no_conversions_is_surfaced_rather_than_guessed_at() {
         assert_eq!(bridge(&"3.0".into(), &VersionNumber::V2_3_0), Bridge::Unsupported);
         assert_eq!(bridge(&VersionNumber::V2_0, &VersionNumber::V2_3_0), Bridge::Unsupported);
+        // 2.1.1 is modelled by this crate and still has no conversions: claiming an `Upgrade`
+        // here would promise a translation that does not exist.
+        assert_eq!(bridge(&VersionNumber::V2_1_1, &VersionNumber::V2_3_0), Bridge::Unsupported);
+        assert_eq!(bridge(&VersionNumber::V2_3_0, &VersionNumber::V2_1_1), Bridge::Unsupported);
     }
 }

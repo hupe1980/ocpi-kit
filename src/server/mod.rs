@@ -50,16 +50,17 @@
 //! is already registered. [`PeerState`](crate::client::PeerState) has the predicates for those.
 
 mod auth;
+mod bridge;
 mod error;
 mod extract;
 mod router;
 mod traits;
 
 pub use auth::{AuthenticatedPeer, InMemoryTokenStore, MountedModules, PeerRegistry, TokenStore};
-pub use error::{HttpStatusCode, OcpiErrorResponse, OcpiReply, check_outgoing, echo_ids};
+pub use error::{HttpStatusCode, OcpiErrorResponse, OcpiReply, echo_ids};
 pub use extract::{
-    Auth, AuthState, ContentTypePolicy, Ids, OcpiJson, OcpiPatch, Owner, Page, RequestContext, Routing,
-    accepts_json, reject,
+    Auth, AuthState, ContentTypePolicy, Ids, OcpiJson, OcpiPatch, Owner, Page, PagePolicy, RequestContext,
+    Routing, accepts_json, reject,
 };
 pub use router::{CallbackUrls, OcpiRouter, OcpiState, ServerConfig};
 pub use traits::{

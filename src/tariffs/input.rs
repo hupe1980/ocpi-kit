@@ -176,6 +176,17 @@ impl PricedSession {
         self.periods.get(index).map_or(0, |p| p.start.unix_timestamp() - self.start.unix_timestamp())
     }
 
+    /// The start of the first period that does not begin after the one before it, if any.
+    ///
+    /// The engine reads the periods as a timeline: a period's duration is the gap to the next
+    /// one, and `step_size` applies to *"the last relevant PriceComponent"*. Neither means
+    /// anything if the list is out of order, which is a thing that happens when a CPO merges
+    /// period streams from more than one source.
+    #[must_use]
+    pub fn first_out_of_order(&self) -> Option<DateTime> {
+        self.periods.windows(2).find(|pair| pair[1].start <= pair[0].start).map(|pair| pair[1].start)
+    }
+
     /// The end of period `index`: the start of the next one, or the end of the session.
     #[must_use]
     pub fn period_end(&self, index: usize) -> Option<DateTime> {
@@ -198,13 +209,31 @@ mod from_v2_3_0 {
             energy_kwh: volume(CdrDimensionType::Energy),
             charging_hours: volume(CdrDimensionType::Time),
             parking_hours: volume(CdrDimensionType::ParkingTime),
-            reservation_hours: volume(CdrDimensionType::ReservationTime),
+            // The `bookings` branch splits reserved time in two. `RESERVATION_EXPIRES` is the
+            // same quantity as `RESERVATION_TIME` — *"time the EVSE has been reserved and not yet
+            // been in use for this customer"* — differing only in that the reservation then ran
+            // out, which is what `PricedSession::reservation_expired` records. `RESERVATION_OVERTIME`
+            // is deliberately **not** added: it is time *after* the reservation, and the branch
+            // does not say which Tariff dimension prices it, so folding it into reserved time
+            // would bill it at a rate nothing in the specification puts it at.
+            reservation_hours: volume(CdrDimensionType::ReservationTime)
+                + volume(CdrDimensionType::ReservationExpires),
             max_current_a: source.volume(CdrDimensionType::MaxCurrent),
             min_current_a: source.volume(CdrDimensionType::MinCurrent),
             max_power_kw: source.volume(CdrDimensionType::MaxPower),
             min_power_kw: source.volume(CdrDimensionType::MinPower),
             tariff_id: source.tariff_id.as_ref().map(|t| t.as_str().to_owned()),
         }
+    }
+
+    /// Whether the periods record a reservation that ran out before charging began.
+    ///
+    /// The `RESERVATION_EXPIRES` dimension is the CPO saying so, and it is what selects the
+    /// `RESERVATION_EXPIRES` Tariff Element over the `RESERVATION` one. Everything else about the
+    /// session — `profile_type`, `ad_hoc_payment` — is not on a CDR at all and stays for the
+    /// caller to set.
+    fn expired(periods: &[ChargingPeriod]) -> bool {
+        periods.iter().any(|p| p.volume(CdrDimensionType::ReservationExpires).is_some())
     }
 
     impl PricedSession {
@@ -222,7 +251,7 @@ mod from_v2_3_0 {
                 time_zone,
                 profile_type: None,
                 ad_hoc_payment: false,
-                reservation_expired: false,
+                reservation_expired: expired(&cdr.charging_periods),
             }
         }
 
@@ -236,7 +265,7 @@ mod from_v2_3_0 {
                 time_zone,
                 profile_type: None,
                 ad_hoc_payment: false,
-                reservation_expired: false,
+                reservation_expired: expired(&session.charging_periods),
             }
         }
     }

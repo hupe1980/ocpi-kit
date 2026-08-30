@@ -478,6 +478,14 @@ ocpi_lenient_enum! {
         DomesticK = "DOMESTIC_K",
         /// Standard/Domestic household, type "L", CEI 23-16-VII, 3 pins.
         DomesticL = "DOMESTIC_L",
+        /// IEC 60309-2 Industrial Connector, single phase 16 A (usually blue).
+        Iec603092Single16 = "IEC_60309_2_single_16",
+        /// IEC 60309-2 Industrial Connector, three phases 16 A (usually red).
+        Iec603092Three16 = "IEC_60309_2_three_16",
+        /// IEC 60309-2 Industrial Connector, three phases 32 A (usually red).
+        Iec603092Three32 = "IEC_60309_2_three_32",
+        /// IEC 60309-2 Industrial Connector, three phases 64 A (usually red).
+        Iec603092Three64 = "IEC_60309_2_three_64",
         /// IEC 62196 Type 1 "SAE J1772".
         Iec62196T1 = "IEC_62196_T1",
         /// Combo Type 1 based, DC.
@@ -577,7 +585,11 @@ mod tests {
 
     #[test]
     fn the_2_1_1_enums_are_much_smaller_than_the_later_ones() {
-        assert_eq!(ConnectorType::ALL_KNOWN.len(), 21);
+        assert_eq!(ConnectorType::ALL_KNOWN.len(), 25);
+        // The four IEC 60309 industrial sockets are the only lower-case wire values in OCPI.
+        let blue: ConnectorType = "IEC_60309_2_single_16".into();
+        assert!(blue.is_known(), "the blue 16 A industrial socket is a 2.1.1 value");
+        assert_eq!(serde_json::to_string(&blue).unwrap(), "\"IEC_60309_2_single_16\"");
         assert_eq!(Capability::ALL_KNOWN.len(), 6);
         assert_eq!(PowerType::ALL_KNOWN.len(), 3);
         // A connector standard invented after 2.1.1 still decodes …

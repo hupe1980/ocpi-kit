@@ -97,6 +97,12 @@ impl Validate for Session {
         if self.kwh.is_negative() {
             v.report_at("kwh", ViolationCode::OutOfRange, "a session cannot charge negative energy");
         }
+        crate::v2_3_0::cdrs::validate_period_sequence(
+            &self.charging_periods.iter().map(|p| p.start_date_time).collect::<Vec<_>>(),
+            self.start_date_time,
+            self.end_date_time,
+            v,
+        );
         if self.status == SessionStatus::Completed && self.end_date_time.is_none() {
             v.report_at(
                 "end_datetime",

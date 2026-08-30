@@ -1,0 +1,6 @@
+---
+source: tests/snapshots.rs
+expression: "rendered.join(\"\\n\")"
+---
+x-limit: 50
+x-total-count: 3

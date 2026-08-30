@@ -28,9 +28,31 @@
 //!
 //! In other words: `ENERGY` is rounded once, on the session total, with the step of the last
 //! energy component used, and the extra lands in the last segment. The time dimensions are
-//! rounded once between them, on the total of whichever of `TIME`/`PARKING_TIME` was active last,
-//! with that dimension's last step size — so charging time followed by parking time is billed
-//! exactly and only the parking is rounded up.
+//! rounded once between them: `PARKING_TIME` absorbs it whenever the session has any, and `TIME`
+//! only when it does not — so charging time followed by parking time is billed exactly and only
+//! the parking is rounded up, which is the specification's own worked example.
+//!
+//! # What the engine assumes about its input, and what it does when that fails
+//!
+//! A Charging Period is the unit of pricing: it carries totals, not a curve, so there is no way
+//! to know how much of its energy fell before a tariff switched and how much after. The
+//! specification puts the obligation on the CPO instead:
+//!
+//! > *A CPO SHALL at least start (and add) a ChargingPeriod every moment/event that has relevance
+//! > for the total costs of a CDR. … When an energy changes in price after 17:00. The CPO has to
+//! > start a new Charging Period at 17:00.*
+//!
+//! Every implementation therefore assumes well-formed periods, and prices each one at the rate
+//! that applied when it began. What is unusual here is that **this engine checks**: it re-evaluates
+//! the restrictions at the moment each period ends, and when a different Price Component would
+//! have applied by then it records a
+//! [`PeriodSpansPriceChange`](super::PricingNoteCode::PeriodSpansPriceChange) note naming the
+//! dimension and the moment.
+//!
+//! That turns a silent few cents into a reviewable line. The total beside it is still the best
+//! answer available from the data — nothing is guessed or interpolated — but the reader is told
+//! that the CDR broke a `SHALL`, which is exactly the finding an invoice reconciliation exists to
+//! produce.
 
 use crate::types::{DateTime, LocalDate, LocalTime, Number};
 use crate::v2_3_0::tariffs::{
@@ -40,7 +62,8 @@ use crate::v2_3_0::tariffs::{
 
 use super::PricingError;
 use super::breakdown::{
-    AppliedComponent, CostBreakdown, DimensionCost, PriceLimitApplied, PricedSegment, TaxLine,
+    AppliedComponent, CostBreakdown, DimensionCost, PriceLimitApplied, PricedSegment, PricingNote,
+    PricingNoteCode, TaxLine,
 };
 use super::input::{PricedPeriod, PricedSession};
 use super::policy::PricingPolicy;
@@ -120,28 +143,74 @@ impl PricingEngine {
         if tariffs.is_empty() {
             return Err(PricingError::NoTariff);
         }
-        let mut notes = Vec::new();
+        let mut notes: Vec<PricingNote> = Vec::new();
 
         // Per dimension, the segments that were priced.
         let mut segments: Vec<(TariffDimensionType, PricedSegment, u32)> = Vec::new();
         let mut flat_charged = false;
 
+        // A pricing input can be built by hand as well as read off a CDR, so the order the
+        // rest of this function depends on is checked here rather than assumed.
+        if let Some(at) = session.first_out_of_order() {
+            notes.push(PricingNote::new(
+                PricingNoteCode::PeriodsOutOfOrder,
+                Some(at),
+                "this Charging Period does not start after the one before it; `step_size` and \
+                 every duration-based restriction are evaluated against the order given, which \
+                 is not a timeline this session could have had",
+            ));
+        }
+
         for (index, period) in session.periods.iter().enumerate() {
             let tariff = Self::select_tariff(session, period, tariffs)?;
             let context = RestrictionContext::build(session, index, period)?;
+            let end_context = RestrictionContext::build_at_end(session, index, period)?;
 
-            for (dimension, quantity) in period_quantities(period) {
+            for (dimension, quantity, reserving) in period_quantities(period) {
                 if quantity.is_zero() {
                     continue;
                 }
+                // A CDR may carry TIME and RESERVATION_TIME in the same ChargingPeriod, and the
+                // two are priced by different Tariff Elements — one restricted with
+                // `reservation`, one not. Looking both up against a single "this period is a
+                // reservation" flag would bill the charging minutes at the reservation rate, so
+                // each quantity is looked up in the context that describes *it*.
+                let context = context.reserving(reserving);
                 let Some(found) = find_component(tariff, dimension, &context) else {
-                    notes.push(format!(
-                        "no {dimension} Price Component in tariff {} matched at {}; \
-                         the specification says there are then no costs for that dimension",
-                        tariff.id, period.start
+                    notes.push(PricingNote::new(
+                        PricingNoteCode::NoPriceComponent,
+                        Some(period.start),
+                        format!(
+                            "no {dimension} Price Component in tariff {} matched{}; \
+                             the specification says there are then no costs for that dimension",
+                            tariff.id,
+                            if reserving { " for the reserved time" } else { "" },
+                        ),
                     ));
                     continue;
                 };
+
+                // The period is priced at the rate that applied when it began. If a different
+                // one would apply by the time it ends, the CPO should have split it here.
+                if let Some(end) = end_context.as_ref().map(|c| c.reserving(reserving))
+                    && let Some(later) = find_component(tariff, dimension, &end)
+                    && (later.element_index, later.component_index)
+                        != (found.element_index, found.component_index)
+                {
+                    notes.push(PricingNote::new(
+                        PricingNoteCode::PeriodSpansPriceChange,
+                        Some(period.start),
+                        format!(
+                            "the {dimension} Charging Period starting here outlasts the Price \
+                             Component that prices it: element {} applies at the start and \
+                             element {} by the time the period ends. A CPO SHALL start a new \
+                             Charging Period at a price change, so this one should have been \
+                             split; its {dimension} is billed in full at the earlier rate, \
+                             because nothing in the period says how it divides",
+                            found.element_index, later.element_index,
+                        ),
+                    ));
+                }
                 segments.push((
                     dimension,
                     PricedSegment {
@@ -158,6 +227,7 @@ impl PricingEngine {
 
             // "FLAT: Flat fee without unit for step_size" — charged once for the session, by the
             // first element that prices it and whose restrictions match.
+            let context = context.reserving(!period.reservation_hours.is_zero());
             if !flat_charged && let Some(found) = find_component(tariff, TariffDimensionType::Flat, &context)
             {
                 flat_charged = true;
@@ -188,8 +258,20 @@ impl PricingEngine {
     ) -> Vec<DimensionCost> {
         use TariffDimensionType::{Energy, Flat, ParkingTime, Time};
 
-        // Which time dimension was active last decides which one absorbs the rounding.
-        let last_time_dimension = segments.iter().rfind(|(d, _, _)| d.is_time_based()).map(|(d, _, _)| *d);
+        // "In the cases that TIME and PARKING_TIME Tariff Elements are both used, `step_size` is
+        //  only taken into account for the total parking duration."
+        //
+        // Unconditional, so PARKING_TIME absorbs the rounding whenever it appears at all. The
+        // spec's own worked example justifies it sequentially instead — "the charging duration is
+        // not rounded up, as it is followed by another time based period" — and the two readings
+        // agree on every session that charges and then parks, which is every session. They part
+        // only on one that parks and then charges, and there the sentence is what governs.
+        let quantised_time_dimension =
+            if segments.iter().any(|(d, _, _)| *d == TariffDimensionType::ParkingTime) {
+                Some(ParkingTime)
+            } else {
+                segments.iter().find(|(d, _, _)| d.is_time_based()).map(|(d, _, _)| *d)
+            };
 
         let mut by_dimension: Vec<(TariffDimensionType, Vec<(PricedSegment, u32)>)> = Vec::new();
         for (dimension, segment, step) in segments {
@@ -206,7 +288,7 @@ impl PricingEngine {
             // Only ENERGY and the last time-based dimension are quantised; a FLAT has no unit.
             let quantise = match dimension {
                 Energy => true,
-                Time | ParkingTime => last_time_dimension == Some(dimension),
+                Time | ParkingTime => quantised_time_dimension == Some(dimension),
                 Flat => false,
             };
             let billed = if quantise {
@@ -234,6 +316,7 @@ impl PricingEngine {
             let mut priced_segments = Vec::with_capacity(list.len());
             for (mut segment, _) in list {
                 segment.cost = self.policy.round_component(segment.quantity * segment.price);
+                segment.quantity = self.policy.round_quantity(segment.quantity);
                 cost = cost + segment.cost;
                 if let Some(percentage) = segment.vat_percentage {
                     vat = vat + self.policy.round_component(segment.cost * percentage / Number::from(100u32));
@@ -243,8 +326,9 @@ impl PricingEngine {
 
             out.push(DimensionCost {
                 dimension,
-                measured,
-                billed,
+                // Reported, not charged: the costs above came from the exact quantities.
+                measured: self.policy.round_quantity(measured),
+                billed: self.policy.round_quantity(billed),
                 cost: self.policy.round_component(cost),
                 vat: self.policy.round_component(vat),
                 segments: priced_segments,
@@ -254,18 +338,44 @@ impl PricingEngine {
     }
 
     /// Totals the dimensions, groups the VAT and applies `min_price`/`max_price`.
-    fn finish(&self, dimensions: Vec<DimensionCost>, tariff: &Tariff, notes: Vec<String>) -> CostBreakdown {
+    ///
+    /// # Why the tax lines move with the total
+    ///
+    /// The specification states the two price limits as independent rules:
+    ///
+    /// > *The total cost of a Charging Session before taxes can never be lower than the value of
+    /// > the min_price's `before_taxes` field. The total cost of a Charging Session after taxes
+    /// > can never be lower than the value of the min_price's `after_taxes` field.*
+    ///
+    /// Applying them literally and stopping there produces an incoherent document. A €0.50
+    /// session with 21% VAT under a `min_price.before_taxes` of €5.00 becomes €5.00 net — but its
+    /// tax lines still describe the €0.50 that was actually metered, so they no longer sum to the
+    /// difference between the two totals. Nobody can file that.
+    ///
+    /// So a clamp moves the taxes with the base, in proportion, and the invariant
+    /// `sum(taxes) == total_incl - total_excl` holds on every breakdown this engine produces. The
+    /// specification says nothing about this because it does not describe a breakdown at all;
+    /// this is the arithmetic that makes one usable, and a
+    /// [`TotalClamped`](super::PricingNoteCode::TotalClamped) note records that it happened.
+    fn finish(
+        &self,
+        dimensions: Vec<DimensionCost>,
+        tariff: &Tariff,
+        mut notes: Vec<PricingNote>,
+    ) -> CostBreakdown {
         let mut taxes: Vec<TaxLine> = Vec::new();
         for dimension in &dimensions {
             for segment in &dimension.segments {
                 let Some(percentage) = segment.vat_percentage else { continue };
                 let amount = self.policy.round_component(segment.cost * percentage / Number::from(100u32));
-                match taxes.iter_mut().find(|t| t.percentage == percentage) {
+                match taxes.iter_mut().find(|t| t.percentage == Some(percentage)) {
                     Some(line) => {
                         line.taxable = line.taxable + segment.cost;
                         line.amount = line.amount + amount;
                     }
-                    None => taxes.push(TaxLine { percentage, taxable: segment.cost, amount }),
+                    None => {
+                        taxes.push(TaxLine { percentage: Some(percentage), taxable: segment.cost, amount });
+                    }
                 }
             }
         }
@@ -277,8 +387,6 @@ impl PricingEngine {
         let mut total_incl = self.policy.round_currency(raw_excl + raw_vat);
         let mut limit_applied = None;
 
-        // "The total cost of a Charging Session before taxes can never be lower than the value of
-        //  the min_price's before_taxes field" — and the same for after taxes, independently.
         if let Some(min) = tariff.min_price.as_ref() {
             if total_excl < min.before_taxes {
                 total_excl = self.policy.round_currency(min.before_taxes);
@@ -303,11 +411,56 @@ impl PricingEngine {
                 limit_applied = Some(PriceLimitApplied::Maximum);
             }
         }
-        // A clamp on the pre-tax total that left the inclusive total alone would be incoherent;
-        // recompute it from the clamped base unless an explicit after-tax bound decided it.
-        if limit_applied.is_some() && total_incl < total_excl {
+
+        let mut base_ratio = Number::ONE;
+        if let Some(applied) = limit_applied {
+            // The pre-tax total moved, so the tax owed on it moved too — unless an explicit
+            // after-tax bound already decided the inclusive total, in which case that wins and
+            // the tax is whatever is left between them.
+            base_ratio = if raw_excl.is_zero() { Number::ONE } else { total_excl / raw_excl };
+            let bounded_after_tax = match applied {
+                PriceLimitApplied::Minimum => tariff.min_price.as_ref().and_then(|p| p.after_taxes),
+                PriceLimitApplied::Maximum => tariff.max_price.as_ref().and_then(|p| p.after_taxes),
+            };
+            if bounded_after_tax.is_none() {
+                // Nothing was metered to scale from: the effective rate is unknowable.
+                let scaled_vat = if raw_excl.is_zero() { Number::ZERO } else { raw_vat * base_ratio };
+                total_incl = self.policy.round_currency(total_excl + scaled_vat);
+            }
+            total_incl = total_incl.max(total_excl);
+            notes.push(PricingNote::new(
+                PricingNoteCode::TotalClamped,
+                None,
+                format!(
+                    "the session metered {raw_excl} before tax, which the tariff's {} price \
+                     limit moved to {total_excl}; the tax lines were moved in proportion so they \
+                     still account for the difference between the two totals",
+                    match applied {
+                        PriceLimitApplied::Minimum => "minimum",
+                        PriceLimitApplied::Maximum => "maximum",
+                    },
+                ),
+            ));
+        }
+
+        // A tariff with a negative `vat` is malformed — `Validate` reports it — but the engine
+        // does not require validated input, and a breakdown where the session costs less with tax
+        // than without is not a document anybody can use.
+        if total_incl < total_excl {
+            notes.push(PricingNote::new(
+                PricingNoteCode::NegativeTax,
+                None,
+                format!(
+                    "the price components of this tariff describe {} of tax, which no tariff can \
+                     mean; the inclusive total is held at the exclusive one. A VAT percentage \
+                     below zero is what causes this, and `Tariff::validate` names the component",
+                    total_incl - total_excl,
+                ),
+            ));
             total_incl = total_excl;
         }
+
+        self.present_taxes(&mut taxes, total_incl - total_excl, base_ratio, total_excl, &mut notes);
 
         CostBreakdown {
             dimensions,
@@ -316,6 +469,66 @@ impl PricingEngine {
             taxes,
             limit_applied,
             notes,
+        }
+    }
+
+    /// Puts the tax lines into the shape a breakdown publishes them in.
+    ///
+    /// Two things happen here, and both are needed for the document to hold together.
+    ///
+    /// The lines are **rounded to currency precision**, like the totals beside them. They are
+    /// accumulated at the finer `component_decimals`, so without this a 2% VAT on €2,502,360
+    /// prints as `500.4720` next to totals that differ by `500.47`. That is a rounding
+    /// discrepancy of half a cent and an audit finding.
+    ///
+    /// And they are made to sum to **exactly** `owed`, with the last line absorbing the residue,
+    /// rather than each being rounded independently and hoping. `base_ratio` carries any
+    /// `min_price`/`max_price` clamp through to the `taxable` bases, so those keep describing the
+    /// amount the tax was actually charged on.
+    fn present_taxes(
+        &self,
+        taxes: &mut Vec<TaxLine>,
+        owed: Number,
+        base_ratio: Number,
+        taxable_base: Number,
+        notes: &mut Vec<PricingNote>,
+    ) {
+        let current: Number = taxes.iter().map(|t| t.amount).sum();
+        if taxes.is_empty() || current.is_zero() {
+            if owed.is_zero() {
+                for line in taxes.iter_mut() {
+                    line.taxable = self.policy.round_currency(line.taxable * base_ratio);
+                    line.amount = Number::ZERO;
+                }
+                return;
+            }
+            // A price limit's `after_taxes` bound above a session that named no VAT at all: the
+            // amount is a fact, the rate is not knowable, and inventing one would be a lie in a
+            // document somebody files.
+            notes.push(PricingNote::new(
+                PricingNoteCode::UnattributedTax,
+                None,
+                format!(
+                    "{owed} of tax is owed that no price component in this session accounts for; \
+                     it comes from a price limit's `after_taxes` bound, which names an amount but \
+                     not a rate",
+                ),
+            ));
+            taxes.clear();
+            taxes.push(TaxLine { percentage: None, taxable: taxable_base, amount: owed });
+            return;
+        }
+
+        let mut running = Number::ZERO;
+        let last = taxes.len() - 1;
+        for (i, line) in taxes.iter_mut().enumerate() {
+            line.taxable = self.policy.round_currency(line.taxable * base_ratio);
+            if i == last {
+                line.amount = owed - running;
+            } else {
+                line.amount = self.policy.round_currency(line.amount * owed / current);
+                running = running + line.amount;
+            }
         }
     }
 
@@ -379,15 +592,23 @@ impl PricingEngine {
 }
 
 /// The quantities one period consumed, in the order the dimensions are evaluated.
-fn period_quantities(period: &PricedPeriod) -> [(TariffDimensionType, Number); 3] {
+///
+/// The third element says whether that quantity is **reserved** time rather than consumed time,
+/// which is what decides between a Tariff Element restricted with `reservation` and one without.
+/// Reserved time is a `TIME` quantity like any other — OCPI has no `RESERVATION` tariff dimension,
+/// only a `reservation` *restriction* — so it shares the dimension, and therefore the `step_size`
+/// budget, with charging time.
+fn period_quantities(period: &PricedPeriod) -> [(TariffDimensionType, Number, bool); 4] {
     [
-        (TariffDimensionType::Energy, period.energy_kwh),
-        (TariffDimensionType::Time, period.charging_hours + period.reservation_hours),
-        (TariffDimensionType::ParkingTime, period.parking_hours),
+        (TariffDimensionType::Energy, period.energy_kwh, false),
+        (TariffDimensionType::Time, period.charging_hours, false),
+        (TariffDimensionType::Time, period.reservation_hours, true),
+        (TariffDimensionType::ParkingTime, period.parking_hours, false),
     ]
 }
 
 /// Everything a restriction can be evaluated against, at one moment of one session.
+#[derive(Clone, Copy)]
 struct RestrictionContext {
     local_time: LocalTime,
     local_date: LocalDate,
@@ -417,9 +638,52 @@ impl RestrictionContext {
             current_upper: period.current_for_upper_bound(),
             power_lower: period.power_for_lower_bound(),
             power_upper: period.power_for_upper_bound(),
-            is_reservation: !period.reservation_hours.is_zero(),
+            is_reservation: false,
             reservation_expired: session.reservation_expired,
         })
+    }
+
+    /// The context at the last instant the period covers, or `None` when the period has no known
+    /// end — an open session's final period.
+    ///
+    /// One second before the end rather than at it, because a period is half-open: one that runs
+    /// up to exactly 17:00 does not span the 17:00 boundary, and must not be reported as if it
+    /// did.
+    fn build_at_end(
+        session: &PricedSession,
+        index: usize,
+        period: &PricedPeriod,
+    ) -> Result<Option<Self>, PricingError> {
+        let Some(end) = session.period_end(index) else { return Ok(None) };
+        let Some(last_instant) = DateTime::from_unix_timestamp(end.unix_timestamp() - 1).ok() else {
+            return Ok(None);
+        };
+        if last_instant <= period.start {
+            // A period of a second or less cannot span anything.
+            return Ok(None);
+        }
+        let local = session.time_zone.to_local(last_instant)?;
+        Ok(Some(Self {
+            local_time: LocalTime::new(local.hour(), local.minute())
+                .map_err(|e| PricingError::TimeZone(e.to_string()))?,
+            local_date: LocalDate::from_date(local.date()),
+            weekday: DayOfWeek::from_iso_number(local.weekday().number_from_monday())
+                .unwrap_or(DayOfWeek::Monday),
+            // By the end of the period, everything it consumed has been consumed.
+            energy_so_far: session.energy_before(index) + period.energy_kwh,
+            duration_so_far_seconds: last_instant.unix_timestamp() - session.start.unix_timestamp(),
+            current_lower: period.current_for_lower_bound(),
+            current_upper: period.current_for_upper_bound(),
+            power_lower: period.power_for_lower_bound(),
+            power_upper: period.power_for_upper_bound(),
+            is_reservation: false,
+            reservation_expired: session.reservation_expired,
+        }))
+    }
+
+    /// This context, viewed as pricing reserved time or consumed time.
+    const fn reserving(&self, is_reservation: bool) -> Self {
+        Self { is_reservation, ..*self }
     }
 
     fn describe(&self) -> String {

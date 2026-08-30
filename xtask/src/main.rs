@@ -3,6 +3,9 @@
 //! ```text
 //! cargo run -p xtask -- sync-fixtures     # copy the spec's examples into fixtures/
 //! cargo run -p xtask -- spec-coverage     # compare the crate's fields with the spec's tables
+//! cargo run -p xtask -- enum-coverage     # compare the crate's enum values with the spec's
+//! cargo run -p xtask -- no-floats         # money is never a float
+//! cargo run -p xtask -- dead-config       # every setting does something
 //! ```
 //!
 //! Both read the vendored specification under `specs/`, which is not shipped with the crate.
@@ -12,6 +15,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 mod coverage;
+mod dead_config;
+mod enums;
 mod fixtures;
 mod floats;
 
@@ -21,10 +26,14 @@ fn main() -> ExitCode {
     let result = match task.as_deref() {
         Some("sync-fixtures") => fixtures::sync(&root),
         Some("spec-coverage") => coverage::report(&root, std::env::args().any(|a| a == "--check")),
+        Some("enum-coverage") => enums::report(&root, std::env::args().any(|a| a == "--check")),
         Some("no-floats") => floats::check(&root),
-        Some(other) => {
-            Err(format!("unknown task {other:?}; try sync-fixtures, spec-coverage or no-floats").into())
-        }
+        Some("dead-config") => dead_config::check(&root),
+        Some(other) => Err(format!(
+            "unknown task {other:?}; try sync-fixtures, spec-coverage, enum-coverage, \
+                 no-floats or dead-config"
+        )
+        .into()),
         None => {
             eprintln!("{}", include_str!("usage.txt"));
             return ExitCode::FAILURE;

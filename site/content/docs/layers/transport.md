@@ -94,6 +94,9 @@ Nothing here invents a base path.
 
 Interop knowledge that is otherwise tribal, turned into documented, testable flags on a `Quirks`
 struct: `accept_unencoded_token`, `send_unencoded_token`, `omit_routing_headers`,
-`trailing_slash`, `null_means_absent`, `na_sentinel`, `case_insensitive_module_ids`,
-`max_page_limit`, `lenient_id_length`, `lenient_content_type`. See
-[Interop notes](@/docs/reference/interop.md).
+`case_insensitive_module_ids`, `peer_max_page_limit`, `lenient_content_type`.
+
+Six, and every one of them changes behaviour — `cargo run -p xtask -- dead-config` fails the build
+otherwise. Accommodations that are unconditional, such as tolerating a trailing slash on a
+discovered URL, are documented as unconditional rather than dressed up as a setting you could
+turn off. See [Interop notes](@/docs/reference/interop.md).

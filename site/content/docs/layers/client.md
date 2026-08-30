@@ -44,6 +44,40 @@ Sender and Receiver interfaces are separate types — `LocationsSender` and `Loc
 because they are different interfaces with different URL shapes and different methods, and mixing
 them up is a class of bug worth removing.
 
+Every one takes and returns `v2_3_0` objects, **whatever version the peer speaks**: a 2.2.1 CPO
+answers `GET {locations}` with 2.2.1 Locations and what arrives here is a
+`v2_3_0::locations::Location`; a `PUT` goes back out as 2.2.1. Load-bearing rather than convenient —
+2.3.0 made `Tariff.tax_included` required and 2.2.1 does not have it, so without the translation a
+typed pull from most peers in the field fails on the first object. The handshake is bridged too.
+
+A field that cannot cross down logs a `tracing` warning with its JSON Pointer; a `PATCH` writing a
+field the versions disagree about is refused before it is sent, with the spec's GET → PUT recovery.
+See [Versions and conversion](@/docs/concepts/versions.md).
+
+`ModuleClient`'s own `get`/`put`/`post`/`patch`/`list` are the escape hatch: they decode exactly the
+type you name and translate nothing.
+
+There is a typed client for every module the crate models a protocol for:
+
+| | |
+|---|---|
+| `peer.locations(…)` / `peer.locations_receiver(…)` | pull Locations, push Locations |
+| `peer.sessions(…)` / `peer.sessions_receiver(…)` | pull Sessions and set charging preferences, push Sessions |
+| `peer.cdrs(…)` | pull CDRs, and `POST` one (the module returns its URL in a `Location` header) |
+| `peer.tariffs(…)` / `peer.tariffs_receiver(…)` | pull Tariffs, push and `DELETE` them |
+| `peer.tokens(…)` / `peer.tokens_receiver(…)` | pull Tokens and authorize in real time, push Tokens |
+| `peer.commands(…)` | send a command, and await its result at a URL you serve |
+| `peer.charging_profiles(…)` | set, read and clear a profile on a session |
+| `peer.hub_client_info(…)` | who a hub says is connected |
+| `peer.payments(…)` | terminals and financial advice confirmations, from either side |
+
+Anything else — the `bookings` and `invoicereconciliation` extension modules, or a peer's vendor
+module — goes through `peer.module(…)`, the untyped `ModuleClient`, which still gives you the
+envelope, the routing headers, the retry rule and the URL policy.
+
+Each of these calls a `Peer`'s **discovered** endpoints. A module the peer never advertised is an
+error before a request is made, rather than a 404 from a URL this crate invented.
+
 ## Crawling
 
 `PageStream` follows every `Link: rel="next"` to the end:
@@ -53,8 +87,36 @@ let mut stream = locations.list(PageQuery::new())?;
 while let Some(location) = stream.next().await? { /* … */ }
 ```
 
-It respects `DEFAULT_MAX_PAGES` so a misbehaving peer cannot spin forever, and it applies
-`crawl_adjustment` when the server caps your page size.
+It respects `DEFAULT_MAX_PAGES`, so a peer whose every page links to itself cannot spin the crawl
+forever — a real and recurring interop failure.
+
+It also applies the concurrency correction the specification asks for:
+
+> *When there are for example 1000 objects matching a query … while crawling over the pages one of
+> these objects is updated. The client detects this: `X-Total-Count` will be lower in the next
+> request. It is advised to redo the previous GET with the `offset` lowered by 1 (if the `offset`
+> was not 0) and after that continue crawling the 'next' page links.*
+
+The GET to redo is the one that **noticed** the drop, and its objects are discarded: an object
+before the crawl's window is gone, so everything after it slid down by one and the object now at
+`offset - 1` would otherwise be skipped. Redoing the *previous* page instead — the other reading of
+that sentence — re-emits a whole page the caller has already been handed. `PageStream::corrections()`
+reports how many times it happened, so a pull over a result set that keeps shifting is visible rather
+than silent.
+
+## Retries
+
+Only `GET` is retried, because the specification says so:
+
+> *OCPI messages SHOULD NOT be queued. When a client does a POST, PUT or PATCH request and that
+> request fails or times out, the client should not queue the message and retry the same message
+> again later.*
+
+The delay is exponential with **equal jitter** — drawn from the upper half of the interval — and
+the draw is seeded from the request's own `X-Request-ID`, which is a fresh UUID. That detail is
+the point of jitter: a schedule computed from the attempt number alone is identical on every
+client in a fleet, so a peer that has just come back from an outage is hit by all of them at the
+same instant. Jitter that every client computes the same way is not jitter.
 
 ## Getting back in sync after an outage
 

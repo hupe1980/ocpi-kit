@@ -13,6 +13,8 @@
 use rust_decimal::RoundingStrategy;
 
 use crate::types::Number;
+#[cfg(test)]
+use crate::types::Validate as _;
 
 /// How and when to round money.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,6 +35,26 @@ pub struct PricingPolicy {
     /// Default [`RoundingStrategy::MidpointAwayFromZero`] — "round half up" — which is what
     /// invoicing legislation in most of Europe assumes.
     pub rounding: RoundingStrategy,
+    /// Decimal places the **quantities** in a [`CostBreakdown`] are reported to.
+    ///
+    /// Default 6, which resolves a second of time (1/3600 h ≈ 0.000278) and a tenth of a watt
+    /// hour, and is comfortably inside what a JSON number carries exactly.
+    ///
+    /// This exists because a measured quantity is not always a short decimal. Summing
+    /// `PARKING_TIME` volumes, or converting seconds to hours, produces values like
+    /// `0.13333333333333333333333333333` — exact as a [`Decimal`](rust_decimal::Decimal), but
+    /// with more significant digits than a JSON number preserves, so a breakdown carrying one
+    /// would fail [`Number::json_round_trips`](crate::types::Number::json_round_trips) and be
+    /// reported as [`Imprecise`](crate::types::ViolationCode::Imprecise) by the crate's own
+    /// validator. An auditable artefact that does not survive being written down is not
+    /// auditable.
+    ///
+    /// Money is **not** rounded to this: costs are computed from the exact quantity and then
+    /// rounded by [`component_decimals`](Self::component_decimals). This setting decides what the
+    /// breakdown *says* was measured, never what was charged.
+    ///
+    /// [`CostBreakdown`]: crate::tariffs::CostBreakdown
+    pub quantity_decimals: u32,
     /// Whether to apply `step_size` block billing.
     ///
     /// Default [`Quantisation::StepSize`]. OCPI 3.0 removes `step_size` in favour of
@@ -49,6 +71,7 @@ impl Default for PricingPolicy {
         Self {
             component_decimals: 4,
             currency_decimals: 2,
+            quantity_decimals: 6,
             rounding: RoundingStrategy::MidpointAwayFromZero,
             quantisation: Quantisation::StepSize,
         }
@@ -79,6 +102,12 @@ impl PricingPolicy {
     #[must_use]
     pub fn round_currency(&self, value: Number) -> Number {
         Number::new(value.get().round_dp_with_strategy(self.currency_decimals, self.rounding))
+    }
+
+    /// Rounds a quantity for reporting. See [`quantity_decimals`](Self::quantity_decimals).
+    #[must_use]
+    pub fn round_quantity(&self, value: Number) -> Number {
+        Number::new(value.get().round_dp_with_strategy(self.quantity_decimals, self.rounding))
     }
 }
 
@@ -157,6 +186,19 @@ mod tests {
         assert_eq!(Quantisation::None.apply(n("5.4"), 500, 1000), n("5.4"));
         let policy = PricingPolicy::default().without_step_size();
         assert_eq!(policy.quantisation, Quantisation::None);
+    }
+
+    #[test]
+    fn a_reported_quantity_survives_being_written_down() {
+        // Eight minutes in hours is a repeating decimal; reporting it verbatim would put a value
+        // in the breakdown that the crate's own validator flags as imprecise.
+        let p = PricingPolicy::default();
+        let eight_minutes = n("8") / n("60");
+        assert!(!eight_minutes.json_round_trips(), "the raw quantity does not");
+        let reported = p.round_quantity(eight_minutes);
+        assert_eq!(reported, n("0.133333"));
+        assert!(reported.json_round_trips());
+        assert!(reported.validate().is_ok());
     }
 
     #[test]

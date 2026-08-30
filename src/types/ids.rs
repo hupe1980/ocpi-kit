@@ -107,7 +107,7 @@ impl PartyRef {
     pub fn from_hub_party_id(value: &CiString<5>) -> Result<Self, InvalidString> {
         let text = value.as_str();
         if text.len() != 5 {
-            return Err(InvalidString::too_long(text.len(), 5, super::text::StringKind::Ci));
+            return Err(InvalidString::wrong_length(text.len(), 5, super::text::StringKind::Ci));
         }
         Self::new(&text[..2], &text[2..])
     }
@@ -232,6 +232,20 @@ impl EvseIdParts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hub_party_id_of_the_wrong_length_says_so() {
+        let round_trip = PartyRef::new("NL", "TNM").unwrap();
+        assert_eq!(round_trip.to_hub_party_id().as_str(), "NLTNM");
+        assert_eq!(PartyRef::from_hub_party_id(&round_trip.to_hub_party_id()).unwrap(), round_trip);
+
+        // A peer that sends a short value gets a message about the length it should have been,
+        // not one claiming a two-character string is too long for five.
+        let short = CiString::<5>::new_lenient("NL");
+        let error = PartyRef::from_hub_party_id(&short).unwrap_err();
+        assert!(error.to_string().contains("exactly 5 characters"), "{error}");
+        assert!(!error.is_too_long());
+    }
 
     #[test]
     fn party_refs_compare_case_insensitively() {

@@ -439,3 +439,310 @@ proptest! {
         }
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// The pricing engine's own invariants
+// ---------------------------------------------------------------------------------------------
+
+/// A breakdown is a document somebody files. These are the two things that have to hold for it to
+/// be evidence of anything, whatever tariff and session produced it.
+#[cfg(all(feature = "tariffs", feature = "v2_3_0"))]
+mod pricing {
+    use super::{any_number, config};
+    use ocpi_kit::tariffs::{PricedPeriod, PricedSession, PricingEngine, TimeZone};
+    use ocpi_kit::types::{DateTime, Extensions, Number};
+    use ocpi_kit::v2_3_0::tariffs::{
+        PriceComponent, PriceLimit, Tariff, TariffDimensionType, TariffElement, TaxIncluded,
+    };
+    use proptest::prelude::*;
+
+    /// A non-negative amount with at most two decimals, which is what a price or a limit is.
+    fn any_amount() -> impl Strategy<Value = Number> {
+        (0i64..100_000i64).prop_map(|cents| Number::new(rust_decimal::Decimal::new(cents, 2)))
+    }
+
+    /// A VAT percentage, **including invalid ones**.
+    ///
+    /// A negative percentage is a malformed tariff that `validate()` reports — and the engine
+    /// does not require validated input, so the invariants below have to survive it. A generator
+    /// that only produces well-formed tariffs proves the engine works on well-formed tariffs,
+    /// which is not the interesting half.
+    fn any_vat() -> impl Strategy<Value = Option<Number>> {
+        proptest::option::of(
+            (-500i64..3000i64).prop_map(|hundredths| Number::new(rust_decimal::Decimal::new(hundredths, 2))),
+        )
+    }
+
+    fn any_limit() -> impl Strategy<Value = Option<PriceLimit>> {
+        proptest::option::of((any_amount(), proptest::option::of(any_amount())).prop_map(
+            |(before_taxes, after_taxes)| PriceLimit {
+                before_taxes,
+                after_taxes,
+                extensions: Extensions::new(),
+            },
+        ))
+    }
+
+    fn any_tariff() -> impl Strategy<Value = Tariff> {
+        (proptest::collection::vec((any_amount(), any_vat(), 0u32..3600u32), 1..4), any_limit(), any_limit())
+            .prop_map(|(components, min_price, max_price)| {
+                let dimensions = [
+                    TariffDimensionType::Energy,
+                    TariffDimensionType::Time,
+                    TariffDimensionType::ParkingTime,
+                    TariffDimensionType::Flat,
+                ];
+                let price_components: Vec<_> = components
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, (price, vat, step_size))| PriceComponent {
+                        component_type: dimensions[i % dimensions.len()],
+                        price,
+                        vat,
+                        step_size,
+                        extensions: Extensions::new(),
+                    })
+                    .collect();
+                let mut tariff = Tariff::builder()
+                    .country_code("DE")
+                    .party_id("ALL")
+                    .id("prop")
+                    .currency("EUR")
+                    .elements(vec![TariffElement::builder().price_components(price_components).build()])
+                    .tax_included(TaxIncluded::No)
+                    .last_updated("2024-01-15T10:00:00Z".parse::<DateTime>().expect("valid"))
+                    .build();
+                tariff.min_price = min_price;
+                tariff.max_price = max_price;
+                tariff
+            })
+    }
+
+    fn any_session() -> impl Strategy<Value = PricedSession> {
+        proptest::collection::vec((any_number(), any_number(), any_number()), 1..4).prop_map(|periods| {
+            let start: DateTime = "2024-01-15T10:00:00Z".parse().expect("valid");
+            let mut session = PricedSession::new(start, TimeZone::utc());
+            for (i, (energy, charging, parking)) in periods.into_iter().enumerate() {
+                let at = DateTime::from_unix_timestamp(
+                    start.unix_timestamp() + i64::try_from(i).expect("small") * 600,
+                )
+                .expect("in range");
+                session = session.with_period(PricedPeriod {
+                    energy_kwh: energy.get().abs().into(),
+                    charging_hours: charging.get().abs().into(),
+                    parking_hours: parking.get().abs().into(),
+                    ..PricedPeriod::new(at)
+                });
+            }
+            session
+        })
+    }
+
+    proptest! {
+        #![proptest_config(config())]
+
+        /// The tax lines account for exactly the difference between the two totals.
+        ///
+        /// Without this a breakdown can print totals whose VAT does not match the tax lines
+        /// beside them, which is not a document any party can file or dispute.
+        #[test]
+        fn tax_lines_always_account_for_the_difference_between_the_totals(
+            tariff in any_tariff(),
+            session in any_session(),
+        ) {
+            let breakdown = PricingEngine::new().price(&session, &[tariff]).expect("prices");
+            let summed: Number = breakdown.taxes.iter().map(|t| t.amount).sum();
+            prop_assert_eq!(
+                summed,
+                breakdown.total_incl_vat - breakdown.total_excl_vat,
+                "tax lines {:?} against totals {} / {}",
+                breakdown.taxes,
+                breakdown.total_excl_vat,
+                breakdown.total_incl_vat
+            );
+        }
+
+        /// The inclusive total is never below the exclusive one, and neither is ever negative.
+        ///
+        /// A clamp is the easy way to break this: raising one total and leaving the other alone
+        /// produces a session that costs less with tax than without.
+        #[test]
+        fn the_totals_are_ordered_and_non_negative(
+            tariff in any_tariff(),
+            session in any_session(),
+        ) {
+            let breakdown = PricingEngine::new().price(&session, &[tariff]).expect("prices");
+            prop_assert!(!breakdown.total_excl_vat.is_negative(), "{}", breakdown.total_excl_vat);
+            prop_assert!(
+                breakdown.total_incl_vat >= breakdown.total_excl_vat,
+                "{} incl < {} excl",
+                breakdown.total_incl_vat,
+                breakdown.total_excl_vat
+            );
+        }
+
+        /// Every number in a breakdown survives being written to JSON and read back.
+        #[test]
+        fn a_breakdown_round_trips_through_json(
+            tariff in any_tariff(),
+            session in any_session(),
+        ) {
+            let breakdown = PricingEngine::new().price(&session, &[tariff]).expect("prices");
+            let json = serde_json::to_string(&breakdown).expect("serialises");
+            let back: ocpi_kit::tariffs::CostBreakdown = serde_json::from_str(&json).expect("parses");
+            prop_assert_eq!(back, breakdown);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Robustness: every parser that faces a peer, against input nobody would write on purpose
+// ---------------------------------------------------------------------------------------------
+//
+// This crate forbids `unsafe`, so the risk from a hostile peer is not memory corruption: it is a
+// panic. A panic in a header parser is a request that kills a task; a panic inside a hub's
+// forwarder is a request that kills a task holding somebody else's message. `cargo-fuzz` would
+// explore these harder, and needs nightly and a separate crate; these run on every commit, which
+// is the property that matters more.
+//
+// Each of these is a parser a *peer* controls the input of.
+
+/// A string biased towards the shapes that break parsers: separators, delimiters, and the
+/// prefixes each parser looks for.
+fn hostile_text() -> impl Strategy<Value = String> {
+    prop_oneof![
+        2 => ".*",
+        1 => proptest::string::string_regex("[<>;=\"', \t\r\n:/?&+-]{0,40}").expect("a valid regex"),
+        1 => proptest::string::string_regex("(Token |Bearer |rel=|<|>|;|=){1,10}.{0,30}")
+            .expect("a valid regex"),
+        1 => proptest::string::string_regex("[0-9T:.Z+-]{0,40}").expect("a valid regex"),
+    ]
+}
+
+proptest! {
+    #![proptest_config(config())]
+
+    /// The `Authorization` header parser, on anything at all.
+    ///
+    /// It Base64-decodes before it validates, which is the step most likely to be surprised.
+    #[test]
+    fn parsing_an_authorization_header_never_panics(value in hostile_text()) {
+        use ocpi_kit::transport::CredentialsToken;
+        for lenient in [false, true] {
+            let _ = CredentialsToken::parse_header(&value, lenient);
+        }
+    }
+
+    /// The `Link` header parser, which has to find `rel="next"` among arbitrary parameters.
+    #[test]
+    fn parsing_a_link_header_never_panics(value in hostile_text()) {
+        let _ = ocpi_kit::transport::headers::parse_link_next(&value);
+    }
+
+    /// The two scalar parsers every object is made of.
+    #[test]
+    fn parsing_a_scalar_never_panics(value in hostile_text()) {
+        let _ = value.parse::<DateTime>();
+        let _ = value.parse::<Number>();
+        let _ = value.parse::<ocpi_kit::types::PartyRef>();
+        let _ = ocpi_kit::types::Url::new(&value);
+        // `new_lenient` accepts anything by construction; the policy check is what must survive it.
+        let _ = ocpi_kit::types::UrlPolicy::default().check(&ocpi_kit::types::Url::new_lenient(value));
+    }
+
+    /// The pagination headers, whose values a peer writes and this client reads.
+    #[test]
+    fn reading_pagination_headers_never_panics(
+        link in hostile_text(),
+        total in hostile_text(),
+        limit in hostile_text(),
+    ) {
+        use ocpi_kit::transport::PageMeta;
+        let mut headers = http::HeaderMap::new();
+        for (name, value) in [("link", link), ("x-total-count", total), ("x-limit", limit)] {
+            if let Ok(value) = http::HeaderValue::from_str(&value) {
+                headers.insert(http::HeaderName::from_static(name), value);
+            }
+        }
+        let _ = PageMeta::from_headers(&headers);
+    }
+
+    /// The envelope, from bytes that are not necessarily JSON and not necessarily an envelope.
+    #[test]
+    fn decoding_an_envelope_never_panics(body in prop::collection::vec(any::<u8>(), 0..512)) {
+        use ocpi_kit::transport::OcpiResponse;
+        let _ = serde_json::from_slice::<OcpiResponse<serde_json::Value>>(&body);
+    }
+
+    /// RFC 7396 merge, over values that are deliberately not objects.
+    ///
+    /// The hub applies a patch to a document it has never decoded, so both sides are a peer's.
+    #[test]
+    fn merging_arbitrary_values_never_panics(
+        target in any_hostile_json(),
+        patch in any_hostile_json(),
+    ) {
+        let mut target = target;
+        merge(&mut target, &patch);
+    }
+}
+
+/// Arbitrary JSON, including the keys and strings a generator would not otherwise produce.
+fn any_hostile_json() -> impl Strategy<Value = serde_json::Value> {
+    let leaf = prop_oneof![
+        Just(serde_json::Value::Null),
+        any::<bool>().prop_map(serde_json::Value::from),
+        any::<i32>().prop_map(serde_json::Value::from),
+        ".*".prop_map(serde_json::Value::from),
+    ];
+    leaf.prop_recursive(3, 24, 4, |inner| {
+        prop_oneof![
+            prop::collection::vec(inner.clone(), 0..4).prop_map(serde_json::Value::from),
+            prop::collection::hash_map(".{0,6}", inner, 0..4)
+                .prop_map(|m| serde_json::Value::Object(m.into_iter().collect())),
+        ]
+    })
+}
+
+#[cfg(all(feature = "convert", feature = "v2_2_1"))]
+mod bridge_robustness {
+    use super::{any_hostile_json, config};
+    use ocpi_kit::VersionNumber;
+    use ocpi_kit::convert::wire::ObjectKind;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(config())]
+
+        /// The version bridge, on a document that is not the object the endpoint claims.
+        ///
+        /// A hub runs this over a body a peer sent, so "not the object it should be" is the
+        /// ordinary case rather than the exceptional one. It must be an error, never a panic.
+        #[test]
+        fn bridging_an_arbitrary_document_never_panics(value in any_hostile_json()) {
+            for kind in [
+                ObjectKind::Location,
+                ObjectKind::Cdr,
+                ObjectKind::Tariff,
+                ObjectKind::Credentials,
+            ] {
+                let _ = kind.bridge(&VersionNumber::V2_2_1, &VersionNumber::V2_3_0, value.clone());
+                let _ = kind.bridge(&VersionNumber::V2_3_0, &VersionNumber::V2_2_1, value.clone());
+            }
+        }
+
+        /// The endpoint classifier, on any path a peer could put in a URL.
+        #[test]
+        fn classifying_an_arbitrary_path_never_panics(path in ".*") {
+            use ocpi_kit::convert::wire::Payload;
+            use ocpi_kit::{InterfaceRole, ModuleId};
+            for module in [ModuleId::Locations, ModuleId::Tokens, ModuleId::Commands, ModuleId::Cdrs] {
+                for interface in [InterfaceRole::Sender, InterfaceRole::Receiver] {
+                    for payload in [Payload::Request, Payload::Response] {
+                        let _ = ObjectKind::for_endpoint(&module, interface, &path, payload);
+                    }
+                }
+            }
+        }
+    }
+}

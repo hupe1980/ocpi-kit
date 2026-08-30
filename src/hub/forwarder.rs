@@ -3,11 +3,13 @@
 use http::Method;
 
 use crate::client::Transport;
+use crate::convert::wire::{ObjectKind, Payload, bridgeable};
+use crate::convert::{Converted, Lossy};
 use crate::transport::{
     OcpiError, OcpiRequest, OcpiResponse, RequestIds, RoutingHeaders, RoutingScenario, StatusCode,
 };
 use crate::types::{PartyRef, Url};
-use crate::{InterfaceRole, ModuleId};
+use crate::{InterfaceRole, ModuleId, VersionNumber};
 
 use super::routing_table::RoutingTable;
 
@@ -30,6 +32,12 @@ pub struct Forwardable {
     pub ids: RequestIds,
     /// The request body, if any.
     pub body: Option<Vec<u8>>,
+    /// The OCPI version the body is written in — the version of the endpoint it arrived on.
+    ///
+    /// A hub is the one place where the two ends of a conversation need not agree on it, so the
+    /// forwarder translates between this and whatever the receiving platform speaks. See
+    /// [`Forwarder::relay`].
+    pub version: VersionNumber,
 }
 
 impl Forwardable {
@@ -115,19 +123,53 @@ impl Relayed {
     }
 }
 
+/// What a hub does with a message between two versions it has no conversions for — today, anything
+/// involving OCPI 2.1.1 or a version this crate does not model.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Unbridgeable {
+    /// Refuse the message, with a `2001` naming both versions. The default.
+    ///
+    /// Handing a 2.1.1 object to a 2.3.0 party — where a cost is a bare number rather than a
+    /// `Price`, and no object carries its owner — produces a document the receiver misreads rather
+    /// than rejects.
+    #[default]
+    Refuse,
+    /// Relay the bytes unchanged, for a hub that is deliberately a pipe between parties that
+    /// understand each other by some arrangement this crate does not model.
+    RelayVerbatim,
+}
+
 /// Relays requests to the platforms in a [`RoutingTable`].
 #[derive(Debug)]
 pub struct Forwarder<'a> {
     transport: &'a Transport,
     table: &'a RoutingTable,
     hub: PartyRef,
+    unbridgeable: Unbridgeable,
+    report_losses: bool,
 }
 
 impl<'a> Forwarder<'a> {
     /// A forwarder for the hub party `hub`.
     #[must_use]
     pub fn new(transport: &'a Transport, table: &'a RoutingTable, hub: PartyRef) -> Self {
-        Self { transport, table, hub }
+        Self { transport, table, hub, unbridgeable: Unbridgeable::default(), report_losses: true }
+    }
+
+    /// What to do with a message between two versions this build cannot translate.
+    #[must_use]
+    pub const fn on_unbridgeable(mut self, policy: Unbridgeable) -> Self {
+        self.unbridgeable = policy;
+        self
+    }
+
+    /// Whether a translation's losses are appended to the response's `status_message`. On by
+    /// default; switch it off for a peer that treats `status_message` as machine-readable.
+    #[must_use]
+    pub const fn report_losses(mut self, report: bool) -> Self {
+        self.report_losses = report;
+        self
     }
 
     /// The hub's own party reference.
@@ -152,14 +194,17 @@ impl<'a> Forwarder<'a> {
     /// Spec: 2.3.0 §transport_and_format_unique_messageg_ids, §status_codes_4xxx_hub_errors
     pub async fn relay(&self, request: &Forwardable, to: &PartyRef, routing: RoutingHeaders) -> Relayed {
         let target = self.table.with_platform(to, |platform| {
-            platform
-                .peer
-                .endpoint_url(&request.module, request.interface)
-                .cloned()
-                .map(|base| (base, platform.peer.token().clone(), platform.peer.quirks().clone()))
+            platform.peer.endpoint_url(&request.module, request.interface).cloned().map(|base| {
+                (
+                    base,
+                    platform.peer.token().clone(),
+                    platform.peer.quirks().clone(),
+                    platform.peer.version().clone(),
+                )
+            })
         });
 
-        let (base, token, quirks) = match target {
+        let (base, token, quirks, their_version) = match target {
             Err(e) => return Relayed { party: to.clone(), outcome: Err(e) },
             Ok(None) => {
                 return Relayed {
@@ -176,11 +221,16 @@ impl<'a> Forwarder<'a> {
             Ok(Some(target)) => target,
         };
 
+        let outgoing_body = match self.carry_request(request, &their_version) {
+            Ok(body) => body,
+            Err(e) => return Relayed { party: to.clone(), outcome: Err(e) },
+        };
+
         let mut outgoing =
             OcpiRequest::new(request.method.clone(), request.url_at(&base), request.module.clone())
                 .routed(routing)
                 .with_ids(request.ids.forwarded());
-        outgoing.body = request.body.clone();
+        outgoing.body = outgoing_body.value;
 
         let outcome = self
             .transport
@@ -189,7 +239,117 @@ impl<'a> Forwarder<'a> {
             .map(|(response, _)| response)
             .map_err(map_hub_error);
 
+        let outcome = outcome
+            .and_then(|response| self.carry_response(request, &their_version, response, outgoing_body.lossy));
+
         Relayed { party: to.clone(), outcome }
+    }
+
+    /// Rewrites a request body into the version the receiving platform speaks.
+    ///
+    /// Costs nothing when the two platforms agree, the request has no body, or the endpoint
+    /// carries an object whose wire format did not change.
+    fn carry_request(
+        &self,
+        request: &Forwardable,
+        their_version: &VersionNumber,
+    ) -> Result<Converted<Option<Vec<u8>>>, OcpiError> {
+        let Some(body) = request.body.as_ref() else { return Ok(Converted::lossless(None)) };
+        if request.version == *their_version {
+            return Ok(Converted::lossless(Some(body.clone())));
+        }
+        let Some(kind) =
+            ObjectKind::for_endpoint(&request.module, request.interface, &request.path, Payload::Request)
+        else {
+            return Ok(Converted::lossless(Some(body.clone())));
+        };
+        if !bridgeable(&request.version, their_version) {
+            return self
+                .refuse_or_relay(&request.version, their_version)
+                .map(|()| Converted::lossless(Some(body.clone())));
+        }
+        let value: serde_json::Value =
+            serde_json::from_slice(body).map_err(|e| OcpiError::MalformedJson(e.to_string()))?;
+        let converted =
+            kind.bridge(&request.version, their_version, value).map_err(|e| OcpiError::Remote {
+                status_code: StatusCode::INVALID_PARAMETERS,
+                status_message: Some(e.to_string()),
+            })?;
+        let bytes =
+            serde_json::to_vec(&converted.value).map_err(|e| OcpiError::MalformedJson(e.to_string()))?;
+        Ok(Converted::new(Some(bytes), converted.lossy))
+    }
+
+    /// Rewrites the `data` of a response back into the version the requesting party speaks.
+    ///
+    /// `lossy` carries what the outbound leg cost: from the requesting party's side the two legs
+    /// are one exchange, so they share one `status_message`.
+    fn carry_response(
+        &self,
+        request: &Forwardable,
+        their_version: &VersionNumber,
+        mut response: OcpiResponse<serde_json::Value>,
+        mut lossy: Lossy,
+    ) -> Result<OcpiResponse<serde_json::Value>, OcpiError> {
+        let data = response.data.take();
+        let Some(data) = data else {
+            return Ok(self.annotate(response, lossy));
+        };
+        let kind = if request.version == *their_version {
+            None
+        } else {
+            ObjectKind::for_endpoint(&request.module, request.interface, &request.path, Payload::Response)
+        };
+        match kind {
+            None => response.data = Some(data),
+            // The outbound leg already applied `Unbridgeable` to this pair; reaching here means it
+            // said to relay verbatim, and the answer travels back the same way.
+            Some(_) if !bridgeable(their_version, &request.version) => {
+                self.refuse_or_relay(their_version, &request.version)?;
+                response.data = Some(data);
+            }
+            Some(kind) => {
+                let converted =
+                    kind.bridge(their_version, &request.version, data).map_err(|e| OcpiError::Remote {
+                        status_code: StatusCode::HUB_ERROR,
+                        status_message: Some(e.to_string()),
+                    })?;
+                lossy.absorb("/data", converted.lossy);
+                response.data = Some(converted.value);
+            }
+        }
+        Ok(self.annotate(response, lossy))
+    }
+
+    /// Appends a translation's losses to the response's `status_message`.
+    fn annotate(
+        &self,
+        mut response: OcpiResponse<serde_json::Value>,
+        lossy: Lossy,
+    ) -> OcpiResponse<serde_json::Value> {
+        if !self.report_losses {
+            return response;
+        }
+        if let Some(note) = lossy.to_status_message() {
+            response.status_message = Some(match response.status_message.take() {
+                Some(existing) if !existing.is_empty() => format!("{existing}; {note}"),
+                _ => note,
+            });
+        }
+        response
+    }
+
+    /// Applies [`Unbridgeable`] to a crossing this build cannot make.
+    fn refuse_or_relay(&self, from: &VersionNumber, to: &VersionNumber) -> Result<(), OcpiError> {
+        match self.unbridgeable {
+            Unbridgeable::RelayVerbatim => Ok(()),
+            Unbridgeable::Refuse => Err(OcpiError::NotRoutable(format!(
+                "this hub has no conversions between OCPI {from} and OCPI {to}, so it will not \
+                 hand one party a document written for the other; set \
+                 Forwarder::on_unbridgeable(Unbridgeable::RelayVerbatim) to relay the bytes \
+                 unchanged instead"
+            ))),
+        }
     }
 
     /// Fans a Broadcast Push out to every party with an opposite role.
@@ -371,6 +531,7 @@ mod tests {
             routing: RoutingHeaders { to, from: PartyRef::new("NL", "TNM").unwrap() },
             ids: RequestIds::generate(),
             body: None,
+            version: VersionNumber::V2_3_0,
         }
     }
 

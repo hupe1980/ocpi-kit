@@ -6,6 +6,7 @@ use http::Method;
 use serde::de::DeserializeOwned;
 
 use crate::ModuleId;
+use crate::convert::wire::ObjectKind;
 use crate::transport::{CrawlAdjustment, OcpiError, OcpiRequest, PageMeta, RoutingHeaders, crawl_adjustment};
 use crate::types::Url;
 
@@ -56,6 +57,7 @@ pub struct PageStream<'a, T> {
     seen: usize,
     corrections: usize,
     max_pages: usize,
+    bridge: Option<ObjectKind>,
 }
 
 /// The number of pages a crawl will fetch before giving up, unless configured otherwise.
@@ -86,7 +88,18 @@ impl<'a, T: DeserializeOwned> PageStream<'a, T> {
             seen: 0,
             corrections: 0,
             max_pages: DEFAULT_MAX_PAGES,
+            bridge: None,
         }
+    }
+
+    /// Translates every page out of the peer's OCPI version into the canonical model.
+    ///
+    /// `kind` says which object the endpoint carries. A peer that already speaks the canonical
+    /// version costs nothing: the translation is skipped, not applied as an identity.
+    #[must_use]
+    pub const fn bridging(mut self, kind: ObjectKind) -> Self {
+        self.bridge = Some(kind);
+        self
     }
 
     /// Caps how many pages this crawl will fetch.
@@ -162,10 +175,14 @@ impl<'a, T: DeserializeOwned> PageStream<'a, T> {
         let offset = offset_of(&url);
         let request =
             OcpiRequest::new(Method::GET, url.clone(), self.module.clone()).routed(self.routing.clone());
-        let page = self.transport.send_page::<T>(&request, self.peer.token(), self.peer.quirks()).await?;
+        let page = self.page(&request).await?;
         self.pages += 1;
 
-        match crawl_adjustment(self.last_total, page.meta.total_count, self.last_offset) {
+        // The correction is measured against *this* request's offset, not the previous page's:
+        // the spec's "redo the previous GET with the offset lowered by 1" is about the GET that
+        // detected the shrink. Rewinding to the page before it would re-yield a whole page of
+        // objects the crawl has already handed out.
+        match crawl_adjustment(self.last_total, page.meta.total_count, offset) {
             CrawlAdjustment::RefetchAt(new_offset) => {
                 self.corrections += 1;
                 tracing::debug!(
@@ -176,7 +193,6 @@ impl<'a, T: DeserializeOwned> PageStream<'a, T> {
                 );
                 self.last_total = page.meta.total_count;
                 self.next = Some(with_offset(&url, new_offset));
-                self.last_offset = new_offset;
                 Ok(())
             }
             CrawlAdjustment::Continue => {
@@ -187,6 +203,26 @@ impl<'a, T: DeserializeOwned> PageStream<'a, T> {
                 Ok(())
             }
         }
+    }
+
+    /// One page, translated out of the peer's version when the crawl was asked to.
+    async fn page(&self, request: &OcpiRequest) -> Result<crate::transport::Page<T>, OcpiError> {
+        let theirs = self.peer.version();
+        let Some(kind) = self.bridge.filter(|_| *theirs != crate::CANONICAL_VERSION) else {
+            return self.transport.send_page::<T>(request, self.peer.token(), self.peer.quirks()).await;
+        };
+        let page = self
+            .transport
+            .send_page::<serde_json::Value>(request, self.peer.token(), self.peer.quirks())
+            .await?;
+        let converted = kind
+            .bridge(theirs, &crate::CANONICAL_VERSION, serde_json::Value::Array(page.items))
+            .map_err(|e| OcpiError::Decode { path: "/".to_owned(), message: e.to_string() })?;
+        let items = serde_path_to_error::deserialize(converted.value).map_err(|e| OcpiError::Decode {
+            path: e.path().to_string(),
+            message: e.into_inner().to_string(),
+        })?;
+        Ok(crate::transport::Page { items, meta: page.meta })
     }
 }
 

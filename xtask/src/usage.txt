@@ -9,6 +9,17 @@ xtask — repository automation for ocpi-kit
                            With --check, exits non-zero when anything is missing, which is what
                            CI runs.
 
+  enum-coverage [--check]  Parse the enum value tables out of the vendored specification and
+                           compare them with the values this crate declares. A missing value on
+                           a closed enum makes a conformant peer's object undecodable; on an open
+                           enum it survives as `Custom(_)` and silently never matches a `match`.
+                           With --check, exits non-zero when anything is missing. CI runs it.
+
+  dead-config              Check that every public configuration field is read somewhere, not
+                           merely assigned. A setting that does nothing is worse than a missing
+                           feature: somebody sets it, believes the problem is handled, and ships.
+                           CI runs it.
+
   no-floats                Scan the wire models and the pricing engine for `f32`/`f64`. Money in
                            OCPI is an exact decimal; a float in an object field or a cost
                            computation is a defect. CI runs it.

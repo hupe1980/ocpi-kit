@@ -66,6 +66,11 @@ while let Some(location) = locations.next().await? {
 call a module endpoint before discovery, or keep using `CREDENTIALS_TOKEN_A` after registration.
 See [Client](@/docs/layers/client.md).
 
+`select_best` negotiates the newest version you both speak — often OCPI 2.2.1, which is still most
+of the market. Nothing after that line changes: `location` above is a `v2_3_0::locations::Location`
+either way, because the client translates at the wire. See
+[Versions and conversion](@/docs/concepts/versions.md).
+
 ## Serve an OCPI API
 
 With the `server` feature you implement one trait per module and interface, and mount it:

@@ -1,0 +1,7 @@
+---
+source: tests/snapshots.rs
+expression: "rendered.join(\"\\n\")"
+---
+link: <https://cpo.example.com/ocpi/cpo/2.3.0/cdrs?offset=150&limit=50>; rel="next"
+x-limit: 50
+x-total-count: 1234

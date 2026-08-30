@@ -118,6 +118,12 @@ impl Validate for Cdr {
             remark,
             last_updated,
         );
+        crate::v2_3_0::cdrs::validate_period_sequence(
+            &self.charging_periods.iter().map(|p| p.start_date_time).collect::<Vec<_>>(),
+            self.start_date_time,
+            Some(self.stop_date_time),
+            v,
+        );
         if self.charging_periods.is_empty() {
             v.report_at(
                 "charging_periods",

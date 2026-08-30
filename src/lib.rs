@@ -16,9 +16,9 @@
 //! | [`server`] | `server` | an `axum` router driven by one trait per module and interface |
 //! | [`hub`] | `hub` | routing, broadcast push, open routing, GET All, version bridging |
 //! | [`tariffs`] | `tariffs` | an auditable pricing engine over CDRs and Sessions |
-//! | [`testkit`] | `testkit` | fixtures, in-memory stores and a mock peer |
+//! | [`testkit`] | `testkit` | sample objects, in-memory stores and a conformant mock peer |
 //!
-//! # Three properties worth knowing about
+//! # Four properties worth knowing about
 //!
 //! **Money is never a float.** Every `number` in every object is a [`types::Number`], an exact
 //! decimal. No public field of any OCPI object in this crate is an `f32` or `f64`, and the
@@ -33,6 +33,11 @@
 //! **Parsing and conformance are separate questions.** A peer that overruns a `string(45)`
 //! cannot make a whole page of Locations undecodable; the value arrives, and
 //! [`types::Validate::validate`] reports it with a JSON Pointer. See [`types::validate`].
+//!
+//! **The peer's OCPI version is not your problem.** [`client`], [`server`] and [`hub`] speak the
+//! canonical [`v2_3_0`] model and translate at the wire, so a 2.2.1 peer — most of the market —
+//! reads and writes as 2.3.0 objects, and anything that cannot cross is reported rather than
+//! dropped. See [`convert`].
 //!
 //! # Getting started
 //!

@@ -24,10 +24,25 @@ pub struct OcpiReply<T> {
     extra: HeaderMap,
 }
 
-impl<T> OcpiReply<T> {
+impl<T: Validate> OcpiReply<T> {
     /// A `1000 Generic success` reply with a payload, answered with HTTP 200.
+    ///
+    /// The payload is validated on its way out, every violation is logged by JSON Pointer at
+    /// `warn`, and it is **sent anyway**. Refusing a partner's `GET` because one Location in a page
+    /// of a hundred has a 46-character name turns this party's data quality into an outage on
+    /// theirs; serving it silently is how it becomes their support ticket weeks later.
+    ///
+    /// A handler that would rather refuse calls
+    /// [`validate`](crate::types::Validate::validate) itself and returns
+    /// [`OcpiError::Invalid`](crate::transport::OcpiError::Invalid).
     #[must_use]
     pub fn ok(data: T) -> Self {
+        if let Err(violations) = data.validate() {
+            tracing::warn!(
+                ocpi.violations = violations.len(),
+                "this server is about to answer with an object that does not conform: {violations}",
+            );
+        }
         Self {
             envelope: OcpiResponse::success(data),
             http_status: HttpStatus::OK,
@@ -44,7 +59,9 @@ impl<T> OcpiReply<T> {
     pub fn created(data: T) -> Self {
         Self { http_status: HttpStatus::CREATED, ..Self::ok(data) }
     }
+}
 
+impl<T> OcpiReply<T> {
     /// A `1000` reply with no payload, for a PUT or PATCH whose response body is unspecified.
     ///
     /// > *We also advise that in such cases, platform sending the response leave the `data` field
@@ -192,18 +209,6 @@ fn internal_error(message: &str, headers: &HeaderMap) -> Response {
     let mut headers = headers.clone();
     headers.remove(http::header::CONTENT_TYPE);
     (HttpStatus::INTERNAL_SERVER_ERROR, headers, message.to_owned()).into_response()
-}
-
-/// Validates an object a handler is about to return, when the server is configured to.
-///
-/// # Errors
-///
-/// Returns [`OcpiError::Invalid`], which becomes a `2001` in the envelope.
-pub fn check_outgoing<T: Validate>(value: &T, enabled: bool) -> Result<(), OcpiError> {
-    if !enabled {
-        return Ok(());
-    }
-    value.validate().map_err(OcpiError::Invalid)
 }
 
 /// Copies the request and correlation IDs onto a response, generating what is missing.

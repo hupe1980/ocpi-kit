@@ -120,14 +120,18 @@ impl<S: Send + Sync> FromRequestParts<S> for Routing {
 #[derive(Clone, Debug)]
 pub struct Page(pub PageQuery);
 
-impl<S: Send + Sync> FromRequestParts<S> for Page {
+impl<S: PagePolicy> FromRequestParts<S> for Page {
     type Rejection = OcpiErrorResponse;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let Query(query) = Query::<PageQuery>::from_request_parts(parts, state).await.map_err(|e| {
             OcpiErrorResponse::new(OcpiError::Decode { path: "?".to_owned(), message: e.body_text() })
         })?;
-        Ok(Self(query))
+        // The handler is given a limit it can honour literally. A peer asking for `?limit=100000`
+        // gets the server's own maximum instead, which is the number `X-Limit` on the way back
+        // says it would get — a cap that is only advertised is not a cap, and the alternative is
+        // that every handler has to remember to clamp.
+        Ok(Self(query.clamped_to(state.max_page_limit())))
     }
 }
 
@@ -242,6 +246,17 @@ pub trait AuthState: Send + Sync {
     fn tokens(&self) -> &dyn TokenStore;
     /// The interoperability profile to parse the `Authorization` header with.
     fn quirks(&self) -> &Quirks;
+}
+
+/// What [`Page`] needs from the router's state.
+///
+/// > *`X-Limit`: The maximum number of objects that the server can return.*
+///
+/// The header is a promise, so the extractor keeps it: a `limit` above this never reaches a
+/// handler.
+pub trait PagePolicy: Send + Sync {
+    /// The largest page this server will return.
+    fn max_page_limit(&self) -> u64;
 }
 
 /// What [`OcpiJson`] needs from the router's state.

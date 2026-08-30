@@ -46,8 +46,8 @@
 
 use core::fmt;
 
-#[cfg(all(feature = "v2_2_1", feature = "v2_3_0"))]
 pub mod v2_2_1_v2_3_0;
+pub mod wire;
 
 /// One piece of information that a conversion could not carry.
 #[derive(Clone, Debug, PartialEq, Eq)]

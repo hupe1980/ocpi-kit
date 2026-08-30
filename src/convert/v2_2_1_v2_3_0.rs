@@ -8,7 +8,6 @@
 //! documentation, and each one appears below either as a documented default (going forward) or as
 //! a recorded [`Loss`](super::Loss) (going back).
 
-use crate::types::Validate;
 use crate::v2_2_1 as old;
 use crate::v2_3_0 as new;
 
@@ -584,6 +583,98 @@ impl Downgrade<old::tokens::Token> for new::tokens::Token {
     }
 }
 
+impl Upgrade<new::tokens::AuthorizationInfo> for old::tokens::AuthorizationInfo {
+    fn upgrade(self) -> Converted<new::tokens::AuthorizationInfo> {
+        Converted::lossless(new::tokens::AuthorizationInfo {
+            allowed: self.allowed,
+            token: self.token.upgrade().value,
+            location: self.location,
+            authorization_reference: self.authorization_reference,
+            info: self.info,
+            extensions: self.extensions,
+        })
+    }
+}
+
+impl Downgrade<old::tokens::AuthorizationInfo> for new::tokens::AuthorizationInfo {
+    fn downgrade(self) -> Converted<old::tokens::AuthorizationInfo> {
+        Converted::lossless(old::tokens::AuthorizationInfo {
+            allowed: self.allowed,
+            token: self.token.downgrade().value,
+            location: self.location,
+            authorization_reference: self.authorization_reference,
+            info: self.info,
+            extensions: self.extensions,
+        })
+    }
+}
+
+// -------------------------------------------------------------------------------------------
+// Commands
+//
+// Only the two command bodies that carry a `Token` differ between the versions;
+// `CancelReservation`, `StopSession` and `UnlockConnector` are wire-identical and 2.2.1
+// re-exports them.
+// -------------------------------------------------------------------------------------------
+
+impl Upgrade<new::commands::StartSession> for old::commands::StartSession {
+    fn upgrade(self) -> Converted<new::commands::StartSession> {
+        Converted::lossless(new::commands::StartSession {
+            response_url: self.response_url,
+            token: self.token.upgrade().value,
+            location_id: self.location_id,
+            evse_uid: self.evse_uid,
+            connector_id: self.connector_id,
+            authorization_reference: self.authorization_reference,
+            extensions: self.extensions,
+        })
+    }
+}
+
+impl Downgrade<old::commands::StartSession> for new::commands::StartSession {
+    fn downgrade(self) -> Converted<old::commands::StartSession> {
+        Converted::lossless(old::commands::StartSession {
+            response_url: self.response_url,
+            token: self.token.downgrade().value,
+            location_id: self.location_id,
+            evse_uid: self.evse_uid,
+            connector_id: self.connector_id,
+            authorization_reference: self.authorization_reference,
+            extensions: self.extensions,
+        })
+    }
+}
+
+impl Upgrade<new::commands::ReserveNow> for old::commands::ReserveNow {
+    fn upgrade(self) -> Converted<new::commands::ReserveNow> {
+        Converted::lossless(new::commands::ReserveNow {
+            response_url: self.response_url,
+            token: self.token.upgrade().value,
+            expiry_date: self.expiry_date,
+            reservation_id: self.reservation_id,
+            location_id: self.location_id,
+            evse_uid: self.evse_uid,
+            authorization_reference: self.authorization_reference,
+            extensions: self.extensions,
+        })
+    }
+}
+
+impl Downgrade<old::commands::ReserveNow> for new::commands::ReserveNow {
+    fn downgrade(self) -> Converted<old::commands::ReserveNow> {
+        Converted::lossless(old::commands::ReserveNow {
+            response_url: self.response_url,
+            token: self.token.downgrade().value,
+            expiry_date: self.expiry_date,
+            reservation_id: self.reservation_id,
+            location_id: self.location_id,
+            evse_uid: self.evse_uid,
+            authorization_reference: self.authorization_reference,
+            extensions: self.extensions,
+        })
+    }
+}
+
 // -------------------------------------------------------------------------------------------
 // CDRs and Sessions
 // -------------------------------------------------------------------------------------------
@@ -742,6 +833,14 @@ impl Downgrade<old::cdrs::Cdr> for new::cdrs::Cdr {
             price_field!(lossy, "total_parking_cost", self.total_parking_cost, downgrade);
         let total_reservation_cost =
             price_field!(lossy, "total_reservation_cost", self.total_reservation_cost, downgrade);
+        #[cfg(feature = "bookings")]
+        if self.booking_id.is_some() {
+            lossy.record(
+                "/booking_id",
+                "OCPI 2.2.1 has no Bookings module, so the booking this CDR settles cannot be \
+                 named; the charge is carried across but the reservation it belongs to is not",
+            );
+        }
         Converted::new(
             old::cdrs::Cdr {
                 country_code: self.country_code,
@@ -975,22 +1074,10 @@ impl Downgrade<old::hub_client_info::ClientInfo> for new::hub_client_info::Clien
     }
 }
 
-/// Checks that a bridged object still conforms to its own version's rules.
-///
-/// A hub should call this on what it is about to forward: a conversion that produced a
-/// non-conformant object is a bug worth catching before it reaches a partner.
-///
-/// # Errors
-///
-/// Returns the violations of the converted object.
-pub fn check_bridged<T: Validate>(converted: &Converted<T>) -> Result<(), crate::types::Violations> {
-    converted.value.validate()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::DateTime;
+    use crate::types::{DateTime, Validate};
 
     fn dt() -> DateTime {
         "2024-01-01T00:00:00Z".parse().unwrap()

@@ -22,6 +22,8 @@ modules and the Sender/Receiver distinction the rest of this guide assumes.
 * You want to expose an OCPI API → [Server](@/docs/layers/server.md)
 * You are building a hub → [Hub](@/docs/layers/hub.md)
 * You want to check an invoice → [Tariffs](@/docs/layers/tariffs.md)
+* Your partner needs something to integrate against → [Testkit](@/docs/layers/testkit.md)
 * A partner's implementation is misbehaving → [Conformance](@/docs/layers/conformance.md)
 * You just want a command line tool → [The CLI](@/docs/getting-started/cli.md)
 * You want to know whether to trust any of this → [How it is verified](@/docs/reference/verification.md)
+* You want to know why it is shaped like this → [Design decisions](@/docs/reference/decisions.md)

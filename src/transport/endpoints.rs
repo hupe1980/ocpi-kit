@@ -148,10 +148,13 @@ impl SenderEndpoint {
 
 /// Appends `segment` to `base`, unless the peer already advertised it there.
 ///
-/// The tolerance is deliberate: see [`SenderEndpoint::payments_terminals`].
+/// The tolerance is deliberate: see [`SenderEndpoint::payments_terminals`]. It compares the last
+/// **path segment** rather than a suffix of the text, so an endpoint published at
+/// `…/payments/my-terminals` still gets `/terminals` appended instead of being mistaken for it.
 fn sub_path(base: &Url, segment: &str) -> Url {
-    if base.as_str().trim_end_matches('/').ends_with(segment) {
-        return base.clone();
+    let trimmed = base.as_str().trim_end_matches('/');
+    if trimmed.rsplit('/').next() == Some(segment) {
+        return Url::new_lenient(trimmed);
     }
     base.join(segment)
 }
@@ -391,6 +394,12 @@ mod tests {
                 "advertised as {advertised}"
             );
         }
+        // …but the tolerance compares a path segment, not a suffix of the text, so an endpoint
+        // that merely ends in those letters is not mistaken for the sub-path itself.
+        assert_eq!(
+            sender("payments/my-terminals").payments_terminals().base().as_str(),
+            "https://e.com/ocpi/cpo/2.3.0/payments/my-terminals/terminals"
+        );
     }
 
     #[test]

@@ -1,14 +1,22 @@
-//! Typed clients for the OCPI 2.3.0 modules.
+//! Typed clients for the OCPI modules, in the canonical 2.3.0 model.
 //!
-//! Each module has up to two clients: a **Sender** client, which pulls from the party that owns
-//! the data, and a **Receiver** client, which pushes to the party that receives it. Which one a
-//! given party uses depends on its role, which is why they are separate types rather than one
-//! grab-bag of methods.
+//! Each module has up to two clients: a **Sender** client, which pulls from the party that owns the
+//! data, and a **Receiver** client, which pushes to the party that receives it.
+//!
+//! They take and return [`v2_3_0`](crate::v2_3_0) objects **whatever version the peer speaks**: a
+//! 2.2.1 CPO's Locations arrive here as 2.3.0 objects, and a `PUT` back to it is written in 2.2.1.
+//! Load-bearing rather than convenient — a 2.2.1 `Tariff` has no `tax_included`, which 2.3.0
+//! requires. The translation is [`convert`](crate::convert), and an outgoing object that loses a
+//! field logs a `tracing` warning naming it by JSON Pointer.
+//!
+//! [`ModuleClient`]'s own `get`/`put`/`post`/`patch`/`list` translate nothing and decode exactly
+//! the type you name; the `*_bridged` variants beside them are what the typed clients use.
 
 use http::Method;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use crate::convert::wire::{BridgeError, ObjectKind};
 use crate::transport::{
     OcpiError, OcpiRequest, Page, PageQuery, Patch, ReceiverEndpoint, RequestIds, RoutingHeaders,
     SenderEndpoint,
@@ -181,7 +189,158 @@ impl<'a> ModuleClient<'a> {
         if response.is_success() { Ok(()) } else { Err(response.into_result().unwrap_err()) }
     }
 
+    /// The peer's version, when it is one this crate has to translate for. `None` is the fast
+    /// path: the peer already speaks the canonical model.
+    fn foreign_version(&self) -> Option<&crate::VersionNumber> {
+        let version = self.peer.version();
+        (*version != crate::CANONICAL_VERSION).then_some(version)
+    }
+
+    /// `GET {url}`, translating the peer's version into the canonical model.
+    ///
+    /// # Errors
+    ///
+    /// As [`ModuleClient::get`], plus [`OcpiError::Decode`] when the peer's document is not the
+    /// object this endpoint carries, and [`OcpiError::Unsupported`] when this build has no
+    /// conversions for the peer's version.
+    pub async fn get_bridged<T: DeserializeOwned>(&self, url: Url, kind: ObjectKind) -> Result<T, OcpiError> {
+        let Some(theirs) = self.foreign_version() else { return self.get(url).await };
+        let value: serde_json::Value = self.get(url).await?;
+        let converted =
+            kind.bridge(theirs, &crate::CANONICAL_VERSION, value).map_err(|e| bridge_error(e, kind))?;
+        decode(converted.value)
+    }
+
+    /// `PUT {url}`, writing the body in the version the peer speaks.
+    ///
+    /// # Errors
+    ///
+    /// As [`ModuleClient::put`], plus [`OcpiError::Unsupported`] when this build cannot write the
+    /// peer's version.
+    pub async fn put_bridged<T: Serialize + Validate>(
+        &self,
+        url: Url,
+        body: &T,
+        kind: ObjectKind,
+    ) -> Result<(), OcpiError> {
+        check_outgoing(body, self.transport.config())?;
+        let Some(value) = self.for_peer(body, kind)? else { return self.put(url, body).await };
+        let request = self.request(Method::PUT, url).with_body(&value)?;
+        self.expect_success(request).await
+    }
+
+    /// `POST {url}`, writing the body in the peer's version and reading the answer back out of it.
+    ///
+    /// `request_kind` and `response_kind` are separate because two OCPI endpoints send one object
+    /// and answer with another — `POST {tokens}/{uid}/authorize` takes a `LocationReferences` and
+    /// returns an `AuthorizationInfo`.
+    ///
+    /// # Errors
+    ///
+    /// As [`ModuleClient::post`], plus the translation errors of
+    /// [`ModuleClient::get_bridged`].
+    pub async fn post_bridged<B: Serialize + Validate, T: DeserializeOwned>(
+        &self,
+        url: Url,
+        body: &B,
+        request_kind: Option<ObjectKind>,
+        response_kind: Option<ObjectKind>,
+    ) -> Result<T, OcpiError> {
+        check_outgoing(body, self.transport.config())?;
+        let Some(theirs) = self.foreign_version().cloned() else {
+            return self.post(url, body).await;
+        };
+        let request = match request_kind.and_then(|k| self.for_peer(body, k).transpose()) {
+            Some(value) => self.request(Method::POST, url).with_body(&value?)?,
+            None => self.request(Method::POST, url).with_body(body)?,
+        };
+        let answer: serde_json::Value =
+            self.transport.send(&request, self.peer.token(), self.peer.quirks()).await?;
+        let Some(kind) = response_kind else { return decode(answer) };
+        let converted =
+            kind.bridge(&theirs, &crate::CANONICAL_VERSION, answer).map_err(|e| bridge_error(e, kind))?;
+        decode(converted.value)
+    }
+
+    /// `PATCH {url}` against a peer on another version.
+    ///
+    /// A merge patch is not an object, so it cannot be decoded, converted and re-encoded. It does
+    /// not have to be: a patch writing only fields the two versions agree about means the same
+    /// thing in both. One that writes a field they disagree about is refused, with the
+    /// specification's own GET → PUT recovery in the message.
+    ///
+    /// # Errors
+    ///
+    /// As [`ModuleClient::patch`], plus [`OcpiError::Unsupported`] when the patch writes a field
+    /// whose shape differs between the two versions.
+    pub async fn patch_bridged<T>(
+        &self,
+        url: Url,
+        patch: &Patch<T>,
+        kind: ObjectKind,
+    ) -> Result<(), OcpiError> {
+        if let Some(theirs) = self.foreign_version()
+            && !kind.patch_crosses_unchanged(&patch.fields())
+        {
+            return Err(OcpiError::Unsupported(format!(
+                "this PATCH writes {:?}, and a {kind} does not carry {} the same way in OCPI \
+                 {theirs} as in OCPI {}; a merge patch is not an object, so it cannot be \
+                 translated. GET the object and PUT it back instead, which is the recovery the \
+                 specification prescribes for a refused PATCH",
+                patch.fields(),
+                kind.divergent_fields().join(", "),
+                crate::CANONICAL_VERSION,
+            )));
+        }
+        self.patch(url, patch).await
+    }
+
+    /// Crawls a list endpoint, translating every page into the canonical model.
+    ///
+    /// # Errors
+    ///
+    /// As [`ModuleClient::list`].
+    pub fn list_bridged<T: DeserializeOwned + Send + 'static>(
+        &self,
+        query: PageQuery,
+        kind: ObjectKind,
+    ) -> Result<PageStream<'a, T>, OcpiError> {
+        Ok(self.list(query)?.bridging(kind))
+    }
+
+    /// Serialises `body` in the peer's version, or `None` when nothing has to change.
+    fn for_peer<T: Serialize>(
+        &self,
+        body: &T,
+        kind: ObjectKind,
+    ) -> Result<Option<serde_json::Value>, OcpiError> {
+        let Some(theirs) = self.foreign_version() else { return Ok(None) };
+        let value = serde_json::to_value(body)
+            .map_err(|e| OcpiError::Decode { path: "/".to_owned(), message: e.to_string() })?;
+        let converted =
+            kind.bridge(&crate::CANONICAL_VERSION, theirs, value).map_err(|e| bridge_error(e, kind))?;
+        if let Some(note) = converted.lossy.to_status_message() {
+            tracing::warn!(
+                ocpi.peer_version = %theirs,
+                ocpi.object = %kind,
+                "{note}",
+            );
+        }
+        Ok(Some(converted.value))
+    }
+
+    async fn expect_success(&self, request: OcpiRequest) -> Result<(), OcpiError> {
+        let (response, _) = self
+            .transport
+            .send_with_headers::<serde_json::Value>(&request, self.peer.token(), self.peer.quirks())
+            .await?;
+        if response.is_success() { Ok(()) } else { Err(response.into_result().unwrap_err()) }
+    }
+
     /// Crawls every page of a Sender list endpoint.
+    ///
+    /// The objects arrive exactly as the peer wrote them; see [`ModuleClient::list_bridged`] for
+    /// the version-translating form the typed clients use.
     ///
     /// # Errors
     ///
@@ -191,7 +350,7 @@ impl<'a> ModuleClient<'a> {
         query: PageQuery,
     ) -> Result<PageStream<'a, T>, OcpiError> {
         let endpoint = self.sender_endpoint().ok_or_else(|| self.missing(InterfaceRole::Sender))?;
-        let query = match self.peer.quirks().max_page_limit {
+        let query = match self.peer.quirks().peer_max_page_limit {
             Some(max) => query.clamped_to(max),
             None => query,
         };
@@ -202,6 +361,25 @@ impl<'a> ModuleClient<'a> {
             self.routing(),
             endpoint.list(&query),
         ))
+    }
+}
+
+impl<'a> ModuleClient<'a> {
+    /// A paginated crawl starting from an explicit URL rather than the module's own list
+    /// endpoint.
+    ///
+    /// Most modules have one list endpoint and [`list`](Self::list) finds it. Payments is the
+    /// exception: it declares a single `ModuleID` and then addresses its two interfaces through
+    /// two different endpoint variables, which version discovery cannot express, so the sub-path
+    /// has to come from the caller. See
+    /// [`SenderEndpoint::payments_terminals`](crate::transport::SenderEndpoint::payments_terminals).
+    #[must_use]
+    pub fn list_from<T: DeserializeOwned + Send + 'static>(
+        &self,
+        base: &Url,
+        query: &PageQuery,
+    ) -> PageStream<'a, T> {
+        PageStream::new(self.transport, self.peer, self.module.clone(), self.routing(), query.apply_to(base))
     }
 }
 
@@ -227,7 +405,7 @@ impl<'a> LocationsSender<'a> {
         &self,
         query: PageQuery,
     ) -> Result<PageStream<'a, crate::v2_3_0::locations::Location>, OcpiError> {
-        self.0.list(query)
+        self.0.list_bridged(query, ObjectKind::Location)
     }
 
     /// `GET {locations}/{location_id}`.
@@ -237,7 +415,7 @@ impl<'a> LocationsSender<'a> {
     /// Propagates transport and OCPI-level errors.
     pub async fn location(&self, location_id: &str) -> Result<crate::v2_3_0::locations::Location, OcpiError> {
         let endpoint = self.0.sender_endpoint().ok_or_else(|| self.0.missing(InterfaceRole::Sender))?;
-        self.0.get(endpoint.location(location_id, None, None)).await
+        self.0.get_bridged(endpoint.location(location_id, None, None), ObjectKind::Location).await
     }
 
     /// `GET {locations}/{location_id}/{evse_uid}`.
@@ -251,7 +429,7 @@ impl<'a> LocationsSender<'a> {
         evse_uid: &str,
     ) -> Result<crate::v2_3_0::locations::Evse, OcpiError> {
         let endpoint = self.0.sender_endpoint().ok_or_else(|| self.0.missing(InterfaceRole::Sender))?;
-        self.0.get(endpoint.location(location_id, Some(evse_uid), None)).await
+        self.0.get_bridged(endpoint.location(location_id, Some(evse_uid), None), ObjectKind::Evse).await
     }
 
     /// `GET {locations}/{location_id}/{evse_uid}/{connector_id}`.
@@ -266,7 +444,12 @@ impl<'a> LocationsSender<'a> {
         connector_id: &str,
     ) -> Result<crate::v2_3_0::locations::Connector, OcpiError> {
         let endpoint = self.0.sender_endpoint().ok_or_else(|| self.0.missing(InterfaceRole::Sender))?;
-        self.0.get(endpoint.location(location_id, Some(evse_uid), Some(connector_id))).await
+        self.0
+            .get_bridged(
+                endpoint.location(location_id, Some(evse_uid), Some(connector_id)),
+                ObjectKind::Connector,
+            )
+            .await
     }
 }
 
@@ -299,7 +482,13 @@ impl<'a> LocationsReceiver<'a> {
         location: &crate::v2_3_0::locations::Location,
     ) -> Result<(), OcpiError> {
         let endpoint = self.0.receiver_endpoint().ok_or_else(|| self.0.missing(InterfaceRole::Receiver))?;
-        self.0.put(endpoint.location(owner, location.id.as_str(), None, None), location).await
+        self.0
+            .put_bridged(
+                endpoint.location(owner, location.id.as_str(), None, None),
+                location,
+                ObjectKind::Location,
+            )
+            .await
     }
 
     /// `PUT {locations}/{country_code}/{party_id}/{location_id}/{evse_uid}`.
@@ -314,7 +503,13 @@ impl<'a> LocationsReceiver<'a> {
         evse: &crate::v2_3_0::locations::Evse,
     ) -> Result<(), OcpiError> {
         let endpoint = self.0.receiver_endpoint().ok_or_else(|| self.0.missing(InterfaceRole::Receiver))?;
-        self.0.put(endpoint.location(owner, location_id, Some(evse.uid.as_str()), None), evse).await
+        self.0
+            .put_bridged(
+                endpoint.location(owner, location_id, Some(evse.uid.as_str()), None),
+                evse,
+                ObjectKind::Evse,
+            )
+            .await
     }
 
     /// `PATCH {locations}/{country_code}/{party_id}/{location_id}[/{evse_uid}[/{connector_id}]]`.
@@ -333,7 +528,12 @@ impl<'a> LocationsReceiver<'a> {
         patch: &Patch<T>,
     ) -> Result<(), OcpiError> {
         let endpoint = self.0.receiver_endpoint().ok_or_else(|| self.0.missing(InterfaceRole::Receiver))?;
-        self.0.patch(endpoint.location(owner, location_id, evse_uid, connector_id), patch).await
+        let kind = match (evse_uid, connector_id) {
+            (None, _) => ObjectKind::Location,
+            (Some(_), None) => ObjectKind::Evse,
+            (Some(_), Some(_)) => ObjectKind::Connector,
+        };
+        self.0.patch_bridged(endpoint.location(owner, location_id, evse_uid, connector_id), patch, kind).await
     }
 }
 
@@ -356,7 +556,7 @@ impl<'a> TokensSender<'a> {
     ///
     /// As [`ModuleClient::list`].
     pub fn list(&self, query: PageQuery) -> Result<PageStream<'a, crate::v2_3_0::tokens::Token>, OcpiError> {
-        self.0.list(query)
+        self.0.list_bridged(query, ObjectKind::Token)
     }
 
     /// `POST {tokens}/{token_uid}/authorize[?type=]` — a real-time authorization.
@@ -378,12 +578,18 @@ impl<'a> TokensSender<'a> {
             token_uid,
             token_type.as_ref().map(super::super::v2_3_0::tokens::TokenType::as_str),
         );
-        if let Some(references) = location {
-            self.0.post(url, references).await
-        } else {
+        // The request is a `LocationReferences`, which is the same object in both versions;
+        // the answer is an `AuthorizationInfo`, which is not.
+        match location {
+            Some(references) => {
+                self.0.post_bridged(url, references, None, Some(ObjectKind::AuthorizationInfo)).await
+            }
             // The body is optional; an empty object keeps the Content-Type consistent.
-            let request = self.0.request(http::Method::POST, url).with_body(&serde_json::json!({}))?;
-            self.0.transport.send(&request, self.0.peer.token(), self.0.peer.quirks()).await
+            None => {
+                self.0
+                    .post_bridged(url, &serde_json::json!({}), None, Some(ObjectKind::AuthorizationInfo))
+                    .await
+            }
         }
     }
 }
@@ -411,7 +617,7 @@ impl<'a> CdrsClient<'a> {
     ///
     /// As [`ModuleClient::list`].
     pub fn list(&self, query: PageQuery) -> Result<PageStream<'a, crate::v2_3_0::cdrs::Cdr>, OcpiError> {
-        self.0.list(query)
+        self.0.list_bridged(query, ObjectKind::Cdr)
     }
 
     /// `POST {cdrs}` — pushes a CDR, returning the URL from the `Location` response header.
@@ -422,7 +628,10 @@ impl<'a> CdrsClient<'a> {
     pub async fn post(&self, cdr: &crate::v2_3_0::cdrs::Cdr) -> Result<Option<Url>, OcpiError> {
         let endpoint = self.0.receiver_endpoint().ok_or_else(|| self.0.missing(InterfaceRole::Receiver))?;
         check_outgoing(cdr, self.0.transport.config())?;
-        let request = self.0.request(Method::POST, endpoint.base().clone()).with_body(cdr)?;
+        let request = match self.0.for_peer(cdr, ObjectKind::Cdr)? {
+            Some(value) => self.0.request(Method::POST, endpoint.base().clone()).with_body(&value)?,
+            None => self.0.request(Method::POST, endpoint.base().clone()).with_body(cdr)?,
+        };
         let (response, headers) = self
             .0
             .transport
@@ -467,11 +676,17 @@ impl<'a> CommandsClient<'a> {
         // the same policy as anything else this process would fetch.
         let url = endpoint.base().join(command.command_type().as_str());
         match command {
-            Command::CancelReservation(c) => self.0.post(url, c).await,
-            Command::ReserveNow(c) => self.0.post(url, c.as_ref()).await,
-            Command::StartSession(c) => self.0.post(url, c.as_ref()).await,
-            Command::StopSession(c) => self.0.post(url, c).await,
-            Command::UnlockConnector(c) => self.0.post(url, c).await,
+            // `CommandResponse` is the same object in every version; only two of the five
+            // request bodies carry a `Token`, and only that is translated.
+            Command::CancelReservation(c) => self.0.post_bridged(url, c, None, None).await,
+            Command::ReserveNow(c) => {
+                self.0.post_bridged(url, c.as_ref(), Some(ObjectKind::ReserveNow), None).await
+            }
+            Command::StartSession(c) => {
+                self.0.post_bridged(url, c.as_ref(), Some(ObjectKind::StartSession), None).await
+            }
+            Command::StopSession(c) => self.0.post_bridged(url, c, None, None).await,
+            Command::UnlockConnector(c) => self.0.post_bridged(url, c, None, None).await,
         }
     }
 }
@@ -498,7 +713,7 @@ impl<'a> SessionsSender<'a> {
         &self,
         query: PageQuery,
     ) -> Result<PageStream<'a, crate::v2_3_0::sessions::Session>, OcpiError> {
-        self.0.list(query)
+        self.0.list_bridged(query, ObjectKind::Session)
     }
 
     /// `PUT {sessions}/{session_id}/charging_preferences`.
@@ -548,7 +763,7 @@ impl<'a> SessionsReceiver<'a> {
         session_id: &str,
     ) -> Result<crate::v2_3_0::sessions::Session, OcpiError> {
         let endpoint = self.0.receiver_endpoint().ok_or_else(|| self.0.missing(InterfaceRole::Receiver))?;
-        self.0.get(endpoint.object(owner, session_id)).await
+        self.0.get_bridged(endpoint.object(owner, session_id), ObjectKind::Session).await
     }
 
     /// `PUT {sessions}/{country_code}/{party_id}/{session_id}`.
@@ -562,7 +777,7 @@ impl<'a> SessionsReceiver<'a> {
         session: &crate::v2_3_0::sessions::Session,
     ) -> Result<(), OcpiError> {
         let endpoint = self.0.receiver_endpoint().ok_or_else(|| self.0.missing(InterfaceRole::Receiver))?;
-        self.0.put(endpoint.object(owner, session.id.as_str()), session).await
+        self.0.put_bridged(endpoint.object(owner, session.id.as_str()), session, ObjectKind::Session).await
     }
 
     /// `PATCH {sessions}/{country_code}/{party_id}/{session_id}`.
@@ -577,7 +792,7 @@ impl<'a> SessionsReceiver<'a> {
         patch: &Patch<T>,
     ) -> Result<(), OcpiError> {
         let endpoint = self.0.receiver_endpoint().ok_or_else(|| self.0.missing(InterfaceRole::Receiver))?;
-        self.0.patch(endpoint.object(owner, session_id), patch).await
+        self.0.patch_bridged(endpoint.object(owner, session_id), patch, ObjectKind::Session).await
     }
 }
 
@@ -603,7 +818,7 @@ impl<'a> TariffsSender<'a> {
         &self,
         query: PageQuery,
     ) -> Result<PageStream<'a, crate::v2_3_0::tariffs::Tariff>, OcpiError> {
-        self.0.list(query)
+        self.0.list_bridged(query, ObjectKind::Tariff)
     }
 }
 
@@ -634,7 +849,7 @@ impl<'a> TariffsReceiver<'a> {
         tariff_id: &str,
     ) -> Result<crate::v2_3_0::tariffs::Tariff, OcpiError> {
         let endpoint = self.0.receiver_endpoint().ok_or_else(|| self.0.missing(InterfaceRole::Receiver))?;
-        self.0.get(endpoint.object(owner, tariff_id)).await
+        self.0.get_bridged(endpoint.object(owner, tariff_id), ObjectKind::Tariff).await
     }
 
     /// `PUT {tariffs}/{country_code}/{party_id}/{tariff_id}`.
@@ -648,7 +863,7 @@ impl<'a> TariffsReceiver<'a> {
         tariff: &crate::v2_3_0::tariffs::Tariff,
     ) -> Result<(), OcpiError> {
         let endpoint = self.0.receiver_endpoint().ok_or_else(|| self.0.missing(InterfaceRole::Receiver))?;
-        self.0.put(endpoint.object(owner, tariff.id.as_str()), tariff).await
+        self.0.put_bridged(endpoint.object(owner, tariff.id.as_str()), tariff, ObjectKind::Tariff).await
     }
 
     /// `DELETE {tariffs}/{country_code}/{party_id}/{tariff_id}`.
@@ -687,7 +902,12 @@ impl<'a> TokensReceiver<'a> {
         token_type: Option<crate::v2_3_0::tokens::TokenType>,
     ) -> Result<crate::v2_3_0::tokens::Token, OcpiError> {
         let endpoint = self.0.receiver_endpoint().ok_or_else(|| self.0.missing(InterfaceRole::Receiver))?;
-        self.0.get(endpoint.token(owner, token_uid, token_type.as_ref().map(TokenType::as_str))).await
+        self.0
+            .get_bridged(
+                endpoint.token(owner, token_uid, token_type.as_ref().map(TokenType::as_str)),
+                ObjectKind::Token,
+            )
+            .await
     }
 
     /// `PUT {tokens}/{country_code}/{party_id}/{token_uid}[?type=]`.
@@ -704,7 +924,7 @@ impl<'a> TokensReceiver<'a> {
     ) -> Result<(), OcpiError> {
         let endpoint = self.0.receiver_endpoint().ok_or_else(|| self.0.missing(InterfaceRole::Receiver))?;
         let url = endpoint.token(owner, token.uid.as_str(), Some(token.token_type.as_str()));
-        self.0.put(url, token).await
+        self.0.put_bridged(url, token, ObjectKind::Token).await
     }
 
     /// `PATCH {tokens}/{country_code}/{party_id}/{token_uid}[?type=]`.
@@ -721,7 +941,7 @@ impl<'a> TokensReceiver<'a> {
     ) -> Result<(), OcpiError> {
         let endpoint = self.0.receiver_endpoint().ok_or_else(|| self.0.missing(InterfaceRole::Receiver))?;
         let url = endpoint.token(owner, token_uid, token_type.as_ref().map(TokenType::as_str));
-        self.0.patch(url, patch).await
+        self.0.patch_bridged(url, patch, ObjectKind::Token).await
     }
 }
 
@@ -834,7 +1054,7 @@ impl<'a> HubClientInfoClient<'a> {
         &self,
         query: PageQuery,
     ) -> Result<PageStream<'a, crate::v2_3_0::hub_client_info::ClientInfo>, OcpiError> {
-        self.0.list(query)
+        self.0.list_bridged(query, ObjectKind::ClientInfo)
     }
 
     /// `GET {hubclientinfo}/{country_code}/{party_id}` — one party's status.
@@ -848,7 +1068,7 @@ impl<'a> HubClientInfoClient<'a> {
     ) -> Result<crate::v2_3_0::hub_client_info::ClientInfo, OcpiError> {
         let endpoint = self.0.receiver_endpoint().ok_or_else(|| self.0.missing(InterfaceRole::Receiver))?;
         let url = endpoint.base().join(party.country_code.as_str()).join(party.party_id.as_str());
-        self.0.get(url).await
+        self.0.get_bridged(url, ObjectKind::ClientInfo).await
     }
 
     /// `PUT {hubclientinfo}/{country_code}/{party_id}` — the hub telling a client about a party.
@@ -862,7 +1082,7 @@ impl<'a> HubClientInfoClient<'a> {
     ) -> Result<(), OcpiError> {
         let endpoint = self.0.receiver_endpoint().ok_or_else(|| self.0.missing(InterfaceRole::Receiver))?;
         let url = endpoint.base().join(info.country_code.as_str()).join(info.party_id.as_str());
-        self.0.put(url, info).await
+        self.0.put_bridged(url, info, ObjectKind::ClientInfo).await
     }
 }
 
@@ -1159,6 +1379,26 @@ impl Peer {
     pub fn payments<'a>(&'a self, transport: &'a Transport, from: PartyRef) -> PaymentsClient<'a> {
         PaymentsClient::new(self.module(transport, ModuleId::Payments, from))
     }
+}
+
+/// Turns a translation failure into the OCPI error a caller can act on.
+fn bridge_error(error: BridgeError, kind: ObjectKind) -> OcpiError {
+    match error {
+        BridgeError::Unsupported { from, to } => OcpiError::Unsupported(format!(
+            "this build has no conversions between OCPI {from} and OCPI {to}, so a {kind} cannot \
+             be carried between them"
+        )),
+        BridgeError::Decode { version, message, .. } => OcpiError::Decode {
+            path: "/".to_owned(),
+            message: format!("the peer's OCPI {version} {kind} could not be read: {message}"),
+        },
+    }
+}
+
+/// Decodes a translated document into the canonical type it is now written as.
+fn decode<T: DeserializeOwned>(value: serde_json::Value) -> Result<T, OcpiError> {
+    serde_path_to_error::deserialize(value)
+        .map_err(|e| OcpiError::Decode { path: e.path().to_string(), message: e.into_inner().to_string() })
 }
 
 /// Convenience: `RequestIds` for a caller that wants to correlate several requests.

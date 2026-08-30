@@ -175,6 +175,99 @@ fn connector_standards_added_after_2_2_1_keep_their_wire_value_through_a_downgra
     assert!(converted.value.validate().is_err());
 }
 
+/// The pricing engine, fed a 2.2.1 CDR directly and the same CDR carried up to 2.3.0.
+///
+/// `PricedSession::from_cdr_v2_2_1` is the entry point that makes "price a CDR from either
+/// version" true, and it had no test at all — the kind of public API that compiles forever and is
+/// never run. The two routes must agree: `Price` is an *output* of pricing, and the charging
+/// periods a 2.2.1 CDR carries are wire-identical to a 2.3.0 one's, so a version boundary cannot
+/// change what a session cost.
+#[test]
+#[cfg(feature = "tariffs")]
+fn a_2_2_1_cdr_prices_the_same_directly_as_it_does_after_an_upgrade() {
+    use ocpi_kit::tariffs::{PricedSession, PricingEngine, TimeZone};
+
+    let old: v2_2_1::cdrs::Cdr = serde_json::from_str(&fixture("cdr_example.json")).expect("decodes");
+    let tariff: v2_3_0::tariffs::Tariff = Upgrade::<v2_3_0::tariffs::Tariff>::upgrade(
+        old.tariffs.first().expect("the example embeds its tariff").clone(),
+    )
+    .value;
+
+    let zone = TimeZone::named("Europe/Amsterdam").expect("a real zone");
+    let direct = PricedSession::from_cdr_v2_2_1(&old, zone.clone());
+    let upgraded = Upgrade::<v2_3_0::cdrs::Cdr>::upgrade(old).value;
+    let bridged = PricedSession::from_cdr(&upgraded, zone);
+
+    assert_eq!(direct.periods, bridged.periods, "the periods are the same objects in both versions");
+
+    let engine = PricingEngine::new();
+    let a = engine.price(&direct, std::slice::from_ref(&tariff)).expect("prices");
+    let b = engine.price(&bridged, &[tariff]).expect("prices");
+    assert_eq!(a.total_excl_vat, b.total_excl_vat, "a version boundary cannot change a cost");
+    assert_eq!(a.total_incl_vat, b.total_incl_vat);
+    assert!(a.total_excl_vat > "0".parse().expect("a number"), "the example is not free");
+}
+
+/// The one claim `ObjectKind::divergent_fields` makes, checked against the whole 2.2.1 corpus.
+///
+/// That list is what decides whether a merge patch can cross a version boundary, and a patch is
+/// the one document this crate cannot verify by decoding it. So the list is verified here
+/// instead, against the specification's own examples: carry each one to 2.3.0 and back, and no
+/// top-level field outside its object's list is allowed to have moved.
+///
+/// If OCPI 2.3.0 turns out to change a field this list does not name, a PATCH writing that field
+/// would be let through and silently mean something else at the far end. This is the test that
+/// stops it.
+#[test]
+fn no_field_outside_the_declared_divergences_moves_across_a_version_boundary() {
+    use ocpi_kit::VersionNumber;
+    use ocpi_kit::convert::wire::ObjectKind;
+
+    let corpus: &[(&str, ObjectKind)] = &[
+        ("location_example.json", ObjectKind::Location),
+        ("location_example_parking_garage_opening_hours.json", ObjectKind::Location),
+        ("location_example_uc2_destination_charger.json", ObjectKind::Location),
+        ("location_example_uc5_home_charge_point.json", ObjectKind::Location),
+        ("tariff_4_complex.json", ObjectKind::Tariff),
+        ("tariff_6_025kwh_start_max_price.json", ObjectKind::Tariff),
+        ("tariff_12_025kwh_min_price.json", ObjectKind::Tariff),
+        ("cdr_example.json", ObjectKind::Cdr),
+        ("session_example_2_short_finished.json", ObjectKind::Session),
+        ("token_example_2_full_rfid.json", ObjectKind::Token),
+        ("credentials_example.json", ObjectKind::Credentials),
+    ];
+
+    for (name, kind) in corpus {
+        let original: serde_json::Value =
+            serde_json::from_str(&fixture(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let up = kind
+            .bridge(&VersionNumber::V2_2_1, &VersionNumber::V2_3_0, original)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let back = kind
+            .bridge(&VersionNumber::V2_3_0, &VersionNumber::V2_2_1, up.value.clone())
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+
+        // Both sides of the comparison have been through this crate's own encoder, so a
+        // difference is a difference in *meaning* rather than in how a decimal was written.
+        let declared = kind.divergent_fields();
+        let before = back.value.as_object().expect("an object");
+        let after = up.value.as_object().expect("an object");
+        let keys: std::collections::BTreeSet<&String> = before.keys().chain(after.keys()).collect();
+        for key in keys {
+            if declared.contains(&key.as_str()) {
+                continue;
+            }
+            assert_eq!(
+                before.get(key),
+                after.get(key),
+                "{name}: `{key}` changed crossing between the versions, but \
+                 {kind}::divergent_fields does not say so — a merge patch writing it would be let \
+                 through and mean something else at the far end",
+            );
+        }
+    }
+}
+
 /// Asserts that a report mentions a given JSON Pointer.
 #[track_caller]
 fn assert_reports(lossy: &Lossy, pointer: &str) {

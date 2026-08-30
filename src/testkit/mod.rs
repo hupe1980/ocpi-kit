@@ -19,9 +19,14 @@
 //! # }
 //! ```
 
+#[cfg(feature = "server")]
+mod peer;
 pub mod sample;
 pub mod stores;
 
+#[cfg(feature = "server")]
+#[cfg_attr(docsrs, doc(cfg(feature = "server")))]
+pub use peer::{MockPeer, MockPeerStores};
 pub use stores::{InMemoryCdrs, InMemoryLocations, InMemorySessions, InMemoryTariffs, InMemoryTokens};
 
 #[cfg(feature = "server")]
@@ -73,13 +78,17 @@ pub fn registered_peer(peer_id: &str, parties: Vec<PartyRef>) -> crate::server::
 
 /// An [`AuthenticatedPeer`](crate::server::AuthenticatedPeer) that still holds
 /// `CREDENTIALS_TOKEN_A`, for testing the scope rule.
+///
+/// Takes the parties for the same reason [`registered_peer`] does: the ownership check compares
+/// the URL's owner against them, so a helper that guessed would make every ownership test a test
+/// of the guess.
 #[cfg(feature = "server")]
 #[must_use]
-pub fn bootstrap_peer(peer_id: &str) -> crate::server::AuthenticatedPeer {
+pub fn bootstrap_peer(peer_id: &str, parties: Vec<PartyRef>) -> crate::server::AuthenticatedPeer {
     crate::server::AuthenticatedPeer {
         peer_id: peer_id.to_owned(),
         role: crate::transport::TokenRole::A,
-        parties: vec![test_cpo()],
+        parties,
         version: VersionNumber::V2_3_0,
     }
 }

@@ -31,7 +31,10 @@ because it has network access to fifty other parties.
 
 * plain `http://`
 * loopback (`127.0.0.0/8`, `::1`, `localhost`, `*.localhost`, `*.local`)
-* private and link-local address ranges
+* private, link-local, carrier-grade-NAT and documentation ranges
+* the same addresses spelled as IPv6: `::ffff:169.254.169.254`, the deprecated
+  `::169.254.169.254`, and the NAT64 prefix `64:ff9b::169.254.169.254` — an allow-list that only
+  knew the dotted-quad form would wave all three through
 
 ```rust
 // For local development against a test peer, and nothing else:
@@ -46,6 +49,24 @@ and `permissive()` for tests.
 
 The CLI exposes the same decision as `--insecure`, with the reason in its help text.
 
+### What URL inspection cannot do
+
+A `UrlPolicy` sees the URL, and only the URL. It cannot see where a **host name** resolves, so
+`https://ptp.example.com/cb` passes even when that name has an `A` record for `169.254.169.254` —
+and a name that resolves differently between the check and the connection defeats it outright, the
+classic DNS rebind. Closing that needs a resolver in the connection path, which belongs to the
+HTTP client rather than to a URL type.
+
+So this is the first of two layers, not the whole defence. The literal-IP rules above stop the
+careless cases; two other things stop the deliberate ones:
+
+* `with_allowed_hosts` — an explicit list per peer is subject to neither problem. You already know
+  which host your partner's endpoints live on; discovery does not have to be trusted to tell you.
+* An **egress policy on the network** that refuses the link-local and private ranges outright,
+  regardless of what any application resolved.
+
+A test asserts the limitation, so it cannot quietly turn into a false sense of safety.
+
 ## Ownership
 
 Client-owned objects live under `{country_code}/{party_id}`. The server checks that a platform
@@ -55,9 +76,11 @@ never called.
 
 ## Limits
 
-Pagination is capped by default (`ServerConfig::max_page_limit`, 100), so a peer cannot ask for a
-million objects in one page — the specification allows a server to return fewer than requested, and
-the response says how many it actually applied.
+Pagination is capped by default (`ServerConfig::max_page_limit`, 100), and the cap is **enforced,
+not merely advertised**: the `Page` extractor clamps an incoming `limit` before a handler sees it,
+so `?limit=100000` reaches your store as `100`. `X-Limit` on the way back says the same number. A
+cap that only appears in a response header is not a cap — it is a note attached to the page your
+handler already built.
 
 Request body size is left to the `axum`/`tower` layer you already have; the router does not add a
 limit of its own, so add `tower_http::limit::RequestBodyLimitLayer` if nothing upstream of you does.
@@ -70,7 +93,20 @@ limit of its own, so add `tower_http::limit::RequestBodyLimitLayer` if nothing u
 * The dependency set is deliberately small, and each optional feature pulls only what it needs —
   with the default features there is no HTTP stack and no async runtime in your build at all.
 
+## Callback URLs you publish
+
+The asynchronous halves of Commands and Charging Profiles are reached at a `response_url` you
+choose and hand to the peer, and *"It is advised to make this URL unique for every request"*. That
+uniqueness is not only for correlation: the URL is a capability you have handed out, so make the
+id unguessable rather than a counter, and treat a result arriving at one as authenticated by the
+credentials token like any other request — which is what `OcpiRouter` does, because these routes
+sit behind the same `Auth` extractor as everything else.
+
+`server::CallbackUrls` builds the URLs that reach the router's own mounts; the unique id is yours
+to generate.
+
 ## What is still yours to do
 
-Terminating TLS, rotating tokens on a schedule, and deciding what your `UrlPolicy` allows in
-production. `ocpi-kit` gives you a token rotation API and a policy type; it cannot know your network.
+Terminating TLS, rotating tokens on a schedule, generating unguessable callback ids, and deciding
+what your `UrlPolicy` allows in production — including whether an egress policy backs it up.
+`ocpi-kit` gives you a token rotation API and a policy type; it cannot know your network.

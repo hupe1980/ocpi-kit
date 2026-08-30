@@ -235,6 +235,14 @@ pub enum OcpiError {
     #[error("cannot route this request: {0}")]
     NotRoutable(String),
 
+    /// This build cannot carry a document between the two OCPI versions involved.
+    ///
+    /// A client whose peer speaks a version this crate has no conversions for, or a merge patch
+    /// that writes a field the two versions disagree about. It is a `3000` rather than a `2001`
+    /// because nothing about the request is wrong: the software simply cannot do it.
+    #[error("not supported by this build: {0}")]
+    Unsupported(String),
+
     /// A URL was refused by the configured [`UrlPolicy`](crate::types::UrlPolicy).
     #[error("refused to call {url}: {reason}")]
     UrlRefused {
@@ -262,7 +270,7 @@ impl OcpiError {
             | Self::TokenAOutOfScope
             | Self::NotFound(_)
             | Self::MethodNotAllowed(_) => StatusCode::CLIENT_ERROR,
-            Self::Transport(_) | Self::UrlRefused { .. } => StatusCode::SERVER_ERROR,
+            Self::Transport(_) | Self::UrlRefused { .. } | Self::Unsupported(_) => StatusCode::SERVER_ERROR,
         }
     }
 

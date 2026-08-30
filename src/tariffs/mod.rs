@@ -52,7 +52,8 @@ mod input;
 mod policy;
 
 pub use breakdown::{
-    AppliedComponent, CostBreakdown, DimensionCost, PriceLimitApplied, PricedSegment, TaxLine,
+    AppliedComponent, CostBreakdown, DimensionCost, PriceLimitApplied, PricedSegment, PricingNote,
+    PricingNoteCode, TaxLine,
 };
 pub use engine::PricingEngine;
 pub use input::{PricedPeriod, PricedSession};
@@ -178,14 +179,15 @@ mod tests {
         Number::from(count) / Number::from(60u32)
     }
 
-    /// Compares two durations at a precision far beyond what any meter reports.
+    /// Compares two quantities at the precision a [`CostBreakdown`] reports them to.
     ///
-    /// A duration in hours is rarely exact in decimal — 35 minutes is 0.58333… — so summing two
-    /// periods and dividing the whole never lands on the same 28th digit. Nothing in billing
-    /// turns on that digit.
+    /// Durations in hours are repeating decimals — 35 minutes is 0.58333… — and the breakdown
+    /// reports them rounded, so an exact comparison would be asserting on digits the artefact
+    /// deliberately does not carry. See `PricingPolicy::quantity_decimals`.
     #[track_caller]
     fn assert_close(actual: Number, expected: Number) {
-        assert_eq!(actual.round_dp(9), expected.round_dp(9), "expected {expected}, got {actual}");
+        let dp = PricingPolicy::default().quantity_decimals;
+        assert_eq!(actual.round_dp(dp), expected.round_dp(dp), "expected {expected}, got {actual}");
     }
 
     fn component(
@@ -310,6 +312,294 @@ mod tests {
         // 4.3 @ 0.20 + 1.2 @ 0.27 = 0.86 + 0.324 = 1.184
         assert_eq!(energy.segments[1].quantity, n("1.2"), "the surplus lands in the last segment");
         assert_eq!(b.total_excl_vat, n("1.18"));
+    }
+
+    #[test]
+    fn charging_time_in_a_reserved_period_is_not_billed_at_the_reservation_rate() {
+        // A ChargingPeriod may carry TIME and RESERVATION_TIME at once. The two are priced by
+        // different Tariff Elements — one restricted with `reservation`, one not — so treating
+        // the whole period as "a reservation" would bill the charging minutes at the
+        // reservation rate, which is usually the more expensive of the two.
+        let t = tariff(vec![
+            restricted(
+                vec![component(TariffDimensionType::Time, "4.00", None, 1)],
+                TariffRestrictions {
+                    reservation: Some(crate::v2_3_0::tariffs::ReservationRestrictionType::Reservation),
+                    ..Default::default()
+                },
+            ),
+            element(vec![component(TariffDimensionType::Time, "1.00", None, 1)]),
+        ]);
+        let session =
+            PricedSession::new(dt("2024-01-15T10:00:00Z"), TimeZone::utc()).with_period(PricedPeriod {
+                charging_hours: n("1"),
+                reservation_hours: n("0.5"),
+                ..PricedPeriod::new(dt("2024-01-15T10:00:00Z"))
+            });
+
+        let b = PricingEngine::new().price(&session, &[t]).unwrap();
+        // 1 h charging @ 1.00 + 0.5 h reserved @ 4.00 = 3.00, not 1.5 h @ 4.00 = 6.00.
+        assert_eq!(b.total_excl_vat, n("3.00"));
+
+        let time = b.dimension(TariffDimensionType::Time).unwrap();
+        assert_eq!(time.segments.len(), 2, "the two are separate segments in the audit trail");
+        assert_eq!(time.segments[0].price, n("1.00"));
+        assert_eq!(time.segments[1].price, n("4.00"));
+        // They still share the TIME dimension, and so the one step_size budget the spec allows.
+        assert_eq!(time.measured, n("1.5"));
+    }
+
+    /// Every breakdown this engine produces must be internally consistent.
+    ///
+    /// The tax lines are what a party files and what a partner checks; if they do not account for
+    /// the difference between the two totals, the document is not evidence of anything.
+    fn assert_taxes_add_up(b: &CostBreakdown) {
+        let summed: Number = b.taxes.iter().map(|t| t.amount).sum();
+        assert_eq!(
+            summed,
+            b.total_incl_vat - b.total_excl_vat,
+            "tax lines {:?} do not account for {} - {}",
+            b.taxes,
+            b.total_incl_vat,
+            b.total_excl_vat,
+        );
+    }
+
+    #[test]
+    fn a_minimum_price_carries_its_tax_with_it() {
+        // A €0.50 session with 21% VAT under a €5.00 minimum. Charging €5.00 net and remitting no
+        // VAT is not a thing a party may do, and tax lines describing the €0.50 that was actually
+        // metered would not add up to the totals printed beside them.
+        let mut t =
+            tariff(vec![element(vec![component(TariffDimensionType::Energy, "0.25", Some("21"), 1)])]);
+        t.min_price = Some(PriceLimit {
+            before_taxes: n("5.00"),
+            after_taxes: None,
+            extensions: crate::types::Extensions::new(),
+        });
+        let session =
+            PricedSession::new(dt("2024-01-15T10:00:00Z"), TimeZone::utc()).with_period(PricedPeriod {
+                energy_kwh: n("2"),
+                ..PricedPeriod::new(dt("2024-01-15T10:00:00Z"))
+            });
+
+        let b = PricingEngine::new().price(&session, &[t]).unwrap();
+        assert_eq!(b.total_excl_vat, n("5.00"));
+        assert_eq!(b.total_incl_vat, n("6.05"), "21% of the clamped base, not of the metered one");
+        assert_taxes_add_up(&b);
+        assert_eq!(b.taxes.len(), 1);
+        assert_eq!(b.taxes[0].percentage, Some(n("21")));
+        assert_eq!(b.limit_applied, Some(PriceLimitApplied::Minimum));
+        assert_eq!(b.notes_with(PricingNoteCode::TotalClamped).count(), 1);
+    }
+
+    #[test]
+    fn a_maximum_price_carries_its_tax_with_it_too() {
+        let mut t =
+            tariff(vec![element(vec![component(TariffDimensionType::Energy, "0.25", Some("20"), 1)])]);
+        t.max_price = Some(PriceLimit {
+            before_taxes: n("10.00"),
+            after_taxes: None,
+            extensions: crate::types::Extensions::new(),
+        });
+        let session =
+            PricedSession::new(dt("2024-01-15T10:00:00Z"), TimeZone::utc()).with_period(PricedPeriod {
+                energy_kwh: n("100"),
+                ..PricedPeriod::new(dt("2024-01-15T10:00:00Z"))
+            });
+
+        let b = PricingEngine::new().price(&session, &[t]).unwrap();
+        assert_eq!(b.total_excl_vat, n("10.00"));
+        assert_eq!(b.total_incl_vat, n("12.00"));
+        assert_taxes_add_up(&b);
+    }
+
+    #[test]
+    fn several_vat_rates_keep_their_proportions_through_a_clamp() {
+        // A start fee at one rate and energy at another: the clamp must not silently pick one.
+        let mut t = tariff(vec![element(vec![
+            component(TariffDimensionType::Flat, "1.00", Some("20"), 0),
+            component(TariffDimensionType::Energy, "0.25", Some("10"), 1),
+        ])]);
+        t.max_price = Some(PriceLimit {
+            before_taxes: n("3.00"),
+            after_taxes: None,
+            extensions: crate::types::Extensions::new(),
+        });
+        let session =
+            PricedSession::new(dt("2024-01-15T10:00:00Z"), TimeZone::utc()).with_period(PricedPeriod {
+                energy_kwh: n("40"),
+                ..PricedPeriod::new(dt("2024-01-15T10:00:00Z"))
+            });
+
+        let b = PricingEngine::new().price(&session, &[t]).unwrap();
+        assert_eq!(b.total_excl_vat, n("3.00"));
+        assert_taxes_add_up(&b);
+        assert_eq!(b.taxes.len(), 2, "both rates survive the clamp: {:?}", b.taxes);
+        assert!(b.taxes.iter().all(|t| t.percentage.is_some()));
+    }
+
+    #[test]
+    fn tax_that_no_rate_explains_is_reported_rather_than_invented() {
+        // A `min_price.after_taxes` above a session whose components named no VAT at all. The
+        // amount is a fact; the rate is not knowable, and making one up would be a lie in a
+        // document somebody files.
+        let mut t = tariff(vec![element(vec![component(TariffDimensionType::Energy, "0.25", None, 1)])]);
+        t.min_price = Some(PriceLimit {
+            before_taxes: n("5.00"),
+            after_taxes: Some(n("6.00")),
+            extensions: crate::types::Extensions::new(),
+        });
+        let session =
+            PricedSession::new(dt("2024-01-15T10:00:00Z"), TimeZone::utc()).with_period(PricedPeriod {
+                energy_kwh: n("2"),
+                ..PricedPeriod::new(dt("2024-01-15T10:00:00Z"))
+            });
+
+        let b = PricingEngine::new().price(&session, &[t]).unwrap();
+        assert_eq!((b.total_excl_vat, b.total_incl_vat), (n("5.00"), n("6.00")));
+        assert_taxes_add_up(&b);
+        assert_eq!(b.taxes.len(), 1);
+        assert_eq!(b.taxes[0].percentage, None, "the amount is known, the rate is not");
+        assert_eq!(b.notes_with(PricingNoteCode::UnattributedTax).count(), 1);
+    }
+
+    #[test]
+    fn a_charging_period_that_outlasts_its_price_is_reported() {
+        // "A CPO SHALL at least start (and add) a ChargingPeriod every moment/event that has
+        //  relevance for the total costs of a CDR. … When an energy changes in price after 17:00.
+        //  The CPO has to start a new Charging Period at 17:00."
+        //
+        // One period 16:50 -> 17:30 with 10 kWh: the CPO should have split it at 17:00. Nothing
+        // in the period says how the energy divides, so it is billed at the earlier rate — and
+        // the reader is told, because that is the finding a reconciliation exists to produce.
+        let t = tariff(vec![
+            restricted(
+                vec![component(TariffDimensionType::Energy, "0.40", None, 1)],
+                TariffRestrictions { start_time: Some("17:00".parse().unwrap()), ..Default::default() },
+            ),
+            element(vec![component(TariffDimensionType::Energy, "0.20", None, 1)]),
+        ]);
+        let session = PricedSession::new(dt("2024-01-15T16:50:00Z"), TimeZone::utc())
+            .with_period(PricedPeriod {
+                energy_kwh: n("10"),
+                ..PricedPeriod::new(dt("2024-01-15T16:50:00Z"))
+            })
+            .ending(dt("2024-01-15T17:30:00Z"));
+
+        let b = PricingEngine::new().price(&session, &[t]).unwrap();
+        assert_eq!(b.total_excl_vat, n("2.00"), "billed at the rate that applied when it began");
+        assert!(b.needs_review());
+        let spans: Vec<_> = b.notes_with(PricingNoteCode::PeriodSpansPriceChange).collect();
+        assert_eq!(spans.len(), 1, "{:?}", b.notes);
+        assert_eq!(spans[0].at, Some(dt("2024-01-15T16:50:00Z")));
+        assert!(spans[0].message.contains("ENERGY"), "{}", spans[0].message);
+    }
+
+    #[test]
+    fn a_period_that_ends_exactly_on_the_boundary_is_not_reported() {
+        // A period is half-open. One running up to exactly 17:00 does not span 17:00, and a false
+        // positive here would train everybody to ignore the note.
+        let t = tariff(vec![
+            restricted(
+                vec![component(TariffDimensionType::Energy, "0.40", None, 1)],
+                TariffRestrictions { start_time: Some("17:00".parse().unwrap()), ..Default::default() },
+            ),
+            element(vec![component(TariffDimensionType::Energy, "0.20", None, 1)]),
+        ]);
+        let session = PricedSession::new(dt("2024-01-15T16:50:00Z"), TimeZone::utc())
+            .with_period(PricedPeriod { energy_kwh: n("5"), ..PricedPeriod::new(dt("2024-01-15T16:50:00Z")) })
+            .with_period(PricedPeriod { energy_kwh: n("5"), ..PricedPeriod::new(dt("2024-01-15T17:00:00Z")) })
+            .ending(dt("2024-01-15T17:30:00Z"));
+
+        let b = PricingEngine::new().price(&session, &[t]).unwrap();
+        assert_eq!(b.total_excl_vat, n("3.00"), "5 kWh at 0.20 then 5 at 0.40");
+        assert!(!b.needs_review(), "a well-formed CDR needs no review: {:?}", b.notes);
+    }
+
+    #[test]
+    fn periods_given_out_of_order_are_reported() {
+        // Charging periods arrive from a CSMS through a CPO's own aggregation, and a merge that
+        // loses the sort is invisible in every field-by-field check: every period is valid.
+        let t = tariff(vec![element(vec![component(TariffDimensionType::Energy, "0.25", None, 1)])]);
+        let session = PricedSession::new(dt("2024-01-15T10:00:00Z"), TimeZone::utc())
+            .with_period(PricedPeriod { energy_kwh: n("1"), ..PricedPeriod::new(dt("2024-01-15T11:00:00Z")) })
+            .with_period(PricedPeriod {
+                energy_kwh: n("1"),
+                ..PricedPeriod::new(dt("2024-01-15T10:30:00Z"))
+            });
+
+        let b = PricingEngine::new().price(&session, &[t]).unwrap();
+        assert_eq!(b.total_excl_vat, n("0.50"), "the quantities are all there, so it still prices");
+        let out_of_order: Vec<_> = b.notes_with(PricingNoteCode::PeriodsOutOfOrder).collect();
+        assert_eq!(out_of_order.len(), 1, "{:?}", b.notes);
+        assert_eq!(out_of_order[0].at, Some(dt("2024-01-15T10:30:00Z")));
+    }
+
+    #[test]
+    fn a_tariff_that_describes_negative_tax_does_not_produce_a_negative_bill() {
+        // A VAT percentage below zero is malformed — `Tariff::validate` says so — but the engine
+        // does not require validated input, and "costs less with tax than without" is not a
+        // document anybody can use.
+        let t = tariff(vec![element(vec![component(TariffDimensionType::Energy, "1.00", Some("-20"), 1)])]);
+        assert!(crate::types::Validate::validate(&t).is_err(), "the tariff is reported as malformed");
+
+        let session =
+            PricedSession::new(dt("2024-01-15T10:00:00Z"), TimeZone::utc()).with_period(PricedPeriod {
+                energy_kwh: n("10"),
+                ..PricedPeriod::new(dt("2024-01-15T10:00:00Z"))
+            });
+        let b = PricingEngine::new().price(&session, &[t]).unwrap();
+
+        assert_eq!(b.total_excl_vat, n("10.00"));
+        assert_eq!(b.total_incl_vat, n("10.00"), "held at the exclusive total, not 8.00");
+        assert_eq!(b.total_vat(), Number::ZERO);
+        assert_eq!(b.notes_with(PricingNoteCode::NegativeTax).count(), 1, "{:?}", b.notes);
+    }
+
+    #[test]
+    fn a_breakdown_survives_being_written_down() {
+        // A cost breakdown is an audit artefact: it gets stored, sent to a partner, and shown to
+        // a driver disputing an invoice. If a quantity in it does not survive a JSON round-trip,
+        // the copy the driver sees is not the one the engine computed.
+        let t = tariff(vec![element(vec![
+            component(TariffDimensionType::Time, "1.00", Some("21"), 600),
+            component(TariffDimensionType::ParkingTime, "2.00", Some("21"), 600),
+            component(TariffDimensionType::Energy, "0.25", Some("21"), 1),
+        ])]);
+        let session = PricedSession::new(dt("2024-01-15T10:00:00Z"), TimeZone::utc())
+            .with_period(PricedPeriod {
+                charging_hours: minutes(7),
+                energy_kwh: n("1") / n("3"),
+                ..PricedPeriod::new(dt("2024-01-15T10:00:00Z"))
+            })
+            .with_period(PricedPeriod {
+                parking_hours: minutes(16),
+                ..PricedPeriod::new(dt("2024-01-15T10:07:00Z"))
+            });
+        let breakdown = PricingEngine::new().price(&session, &[t]).unwrap();
+
+        for dimension in &breakdown.dimensions {
+            assert!(
+                dimension.measured.json_round_trips(),
+                "{} measured {}",
+                dimension.dimension,
+                dimension.measured
+            );
+            assert!(
+                dimension.billed.json_round_trips(),
+                "{} billed {}",
+                dimension.dimension,
+                dimension.billed
+            );
+            for segment in &dimension.segments {
+                assert!(segment.quantity.json_round_trips(), "quantity {}", segment.quantity);
+                assert!(segment.cost.json_round_trips(), "cost {}", segment.cost);
+            }
+        }
+        let json = serde_json::to_string(&breakdown).unwrap();
+        let back: CostBreakdown = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, breakdown, "the stored copy is the computed one");
     }
 
     #[test]

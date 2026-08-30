@@ -180,8 +180,14 @@ impl CredentialsHandler for SharedCpo {
 }
 
 impl TokensSender for SharedMsp {
-    async fn list(&self, _query: PageQuery, _context: RequestContext) -> Handled<Page<Token>> {
-        Ok(Page::single(vec![sample::token("012345678").expect("valid sample")]))
+    async fn list(&self, query: PageQuery, _context: RequestContext) -> Handled<Page<Token>> {
+        // Honouring `date_from` matters even in a one-object stub: a Sender interface that
+        // returns the same page whatever the filter says turns a partner's incremental pull into
+        // a full one, and the conformance runner checks for exactly that.
+        let token = sample::token("012345678").expect("valid sample");
+        let matches = query.date_from.is_none_or(|from| token.last_updated >= from)
+            && query.date_to.is_none_or(|to| token.last_updated < to);
+        Ok(Page::single(if matches { vec![token] } else { Vec::new() }))
     }
 
     async fn authorize(
@@ -385,6 +391,57 @@ async fn a_client_owned_put_then_patch_round_trips() {
     let stored = cpo.locations.get("LOC-NEW").expect("still there");
     assert_eq!(stored.name.as_deref(), Some("Renamed"));
     assert_eq!(stored.last_updated.to_string(), "2024-02-01T00:00:00Z");
+}
+
+#[tokio::test]
+async fn a_failed_patch_falls_back_to_get_then_put() {
+    // "In case a PATCH request fails, the client is expected to call the GET method to check the
+    //  state of the object in the other party's system. If the object doesn't exist, the client
+    //  should do a PUT."
+    //
+    // The spec describes a recovery *procedure*, not a single call, and getting it wrong means
+    // either losing an update or resurrecting a deleted object. This walks it end to end.
+    use ocpi_kit::transport::{PatchFallback, patch_fallback};
+
+    let (server, cpo) = start(10, 0).await;
+    let client = client();
+    let peer = peer_at(&server.base, test_token("c"));
+    let locations = peer.locations_receiver(client.transport(), test_msp());
+    let location = sample::location("LOC-NEW").expect("valid sample");
+
+    // The object does not exist yet, so the PATCH fails.
+    let patch = Patch::<Location>::from_value(serde_json::json!({
+        "name": "Renamed",
+        "last_updated": "2024-02-01T09:00:00Z",
+    }));
+    let failure = locations
+        .patch(&test_msp(), "LOC-NEW", None, None, &patch)
+        .await
+        .expect_err("there is nothing to patch");
+
+    // Step one: what does the fallback say to do?
+    assert_eq!(
+        patch_fallback(&failure),
+        PatchFallback::PutWholeObject,
+        "a 404 means the object is absent, so the whole object has to be sent",
+    );
+
+    // Step two: do it, and the object now exists with the whole state, not just the patched field.
+    locations.put_location(&test_msp(), &location).await.expect("the PUT creates it");
+    assert!(cpo.locations.get("LOC-NEW").is_some());
+
+    // And now the same PATCH succeeds, because there is something to merge into.
+    locations.patch(&test_msp(), "LOC-NEW", None, None, &patch).await.expect("the retry succeeds");
+    let stored = cpo.locations.get("LOC-NEW").expect("stored");
+    assert_eq!(stored.name.as_ref().map(ocpi_kit::types::OcpiString::as_str), Some("Renamed"));
+    assert_eq!(stored.id.as_str(), "LOC-NEW", "the rest of the object is untouched");
+
+    // A failure that is *not* a 404 means the object may well exist; reconcile before writing.
+    assert_eq!(
+        patch_fallback(&OcpiError::Transport("connection reset".into())),
+        PatchFallback::GetThenReconcile,
+        "blindly PUTting after an ambiguous failure would clobber concurrent updates",
+    );
 }
 
 #[tokio::test]
@@ -595,6 +652,28 @@ async fn every_response_echoes_the_request_and_correlation_ids() {
 }
 
 #[tokio::test]
+async fn a_limit_above_the_servers_maximum_never_reaches_a_handler() {
+    // "X-Limit: The maximum number of objects that the server can return." The header is a
+    // promise; a cap that is only advertised is not a cap, and a peer asking for a hundred
+    // thousand objects is how a list endpoint becomes a denial of service.
+    let (server, cpo) = start(1000, 40).await;
+    let http = reqwest::Client::new();
+
+    let response = http
+        .get(server.base.join("locations").with_query("limit=100000").as_str())
+        .header("Authorization", test_token("c").to_header_value())
+        .send()
+        .await
+        .expect("the request succeeds");
+    assert_eq!(response.headers().get("x-limit").unwrap(), "100", "the advertised maximum");
+
+    let body: serde_json::Value = response.json().await.expect("an envelope");
+    let returned = body["data"].as_array().expect("a list").len();
+    assert!(returned <= 100, "the handler was asked for at most the maximum, got {returned}");
+    assert_eq!(cpo.locations.len(), 40, "and the store really does hold more than one page");
+}
+
+#[tokio::test]
 async fn a_body_that_is_not_json_is_a_400_and_a_wrong_object_is_a_2001() {
     let (server, _cpo) = start(100, 0).await;
     let http = reqwest::Client::new();
@@ -662,6 +741,14 @@ async fn the_conformance_runner_finds_nothing_wrong_with_our_own_server() {
         report.checks.iter().any(|c| c.outcome == Outcome::Skipped),
         "sessions, cdrs and tariffs are not mounted here:\n{report}"
     );
+
+    // The two checks that need a *second* request must have actually run rather than skipped:
+    // a check that quietly does nothing is a check that passes for the wrong reason.
+    for id in ["module.offset", "module.date_from"] {
+        let check =
+            report.checks.iter().find(|c| c.id == id).unwrap_or_else(|| panic!("{id} never ran:\n{report}"));
+        assert_eq!(check.outcome, Outcome::Pass, "{id}: {}", check.detail);
+    }
 }
 
 #[tokio::test]

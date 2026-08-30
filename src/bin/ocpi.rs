@@ -4,6 +4,7 @@
 //! ocpi validate location.json --as location            # is this object conformant?
 //! ocpi versions https://cpo.example.com/ocpi/versions --token …
 //! ocpi pull locations https://… --token … --limit 50
+//! ocpi pull payment-terminals https://… --token …
 //! ocpi price cdr.json --tariff tariff.json --time-zone Europe/Berlin
 //! ocpi convert location.json --from 2.2.1 --to 2.3.0   # with a loss report
 //! ocpi schema location --version 2.3.0                  # JSON Schema
@@ -135,6 +136,27 @@ enum Command {
         #[arg(long)]
         to: SupportedVersion,
     },
+    /// Serve a conformant OCPI party in memory, for a partner to integrate against.
+    ServeMock {
+        /// Address to listen on.
+        #[arg(long, default_value = "127.0.0.1:8080")]
+        bind: String,
+        /// The base URL the endpoints are published under, as a partner will reach them.
+        ///
+        /// Defaults to `http://<bind>`, which is right for local integration and wrong the moment
+        /// there is a reverse proxy in front — the version details are generated from it.
+        #[arg(long)]
+        base_url: Option<String>,
+        /// Which role the mock fills, which decides the party it speaks as.
+        #[arg(long, value_enum, default_value = "cpo")]
+        role: MockRole,
+        /// Which OCPI version to publish. A 2.2.1 mock answers 2.2.1 bytes.
+        #[arg(long, default_value = "2.3.0")]
+        version: MockVersion,
+        /// Start with no objects at all, rather than one of each.
+        #[arg(long)]
+        empty: bool,
+    },
     /// Print the JSON Schema of an OCPI object.
     Schema {
         /// Which object.
@@ -143,6 +165,33 @@ enum Command {
         #[arg(long, default_value = "2.3.0")]
         version: SupportedVersion,
     },
+}
+
+/// The role a `serve-mock` party fills.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum MockRole {
+    /// A Charge Point Operator: it owns Locations, Sessions, CDRs and Tariffs.
+    Cpo,
+    /// An e-Mobility Service Provider: it owns Tokens.
+    Emsp,
+}
+
+/// The versions `serve-mock` can publish — the ones this build can write on the wire.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum MockVersion {
+    #[value(name = "2.2.1")]
+    V2_2_1,
+    #[value(name = "2.3.0")]
+    V2_3_0,
+}
+
+impl From<MockVersion> for VersionNumber {
+    fn from(value: MockVersion) -> Self {
+        match value {
+            MockVersion::V2_2_1 => Self::V2_2_1,
+            MockVersion::V2_3_0 => Self::V2_3_0,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -189,6 +238,7 @@ enum ConvertibleKind {
     Price,
 }
 
+/// Every Sender interface that answers with a paginated list.
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum PullModule {
     Locations,
@@ -196,16 +246,37 @@ enum PullModule {
     Cdrs,
     Tariffs,
     Tokens,
+    HubClientInfo,
+    /// The Payments module's terminals list.
+    PaymentTerminals,
+    /// The Payments module's financial advice confirmations list.
+    FinancialAdviceConfirmations,
 }
 
-impl From<PullModule> for ModuleId {
-    fn from(value: PullModule) -> Self {
-        match value {
-            PullModule::Locations => Self::Locations,
-            PullModule::Sessions => Self::Sessions,
-            PullModule::Cdrs => Self::Cdrs,
-            PullModule::Tariffs => Self::Tariffs,
-            PullModule::Tokens => Self::Tokens,
+impl PullModule {
+    const fn module(self) -> ModuleId {
+        match self {
+            Self::Locations => ModuleId::Locations,
+            Self::Sessions => ModuleId::Sessions,
+            Self::Cdrs => ModuleId::Cdrs,
+            Self::Tariffs => ModuleId::Tariffs,
+            Self::Tokens => ModuleId::Tokens,
+            Self::HubClientInfo => ModuleId::HubClientInfo,
+            Self::PaymentTerminals | Self::FinancialAdviceConfirmations => ModuleId::Payments,
+        }
+    }
+
+    /// The sub-path below the discovered endpoint, for the one module that has two of them.
+    ///
+    /// Payments declares a single `ModuleID` and then addresses its two interfaces through two
+    /// different endpoint variables, which version discovery cannot express; the discovered
+    /// `payments` endpoint is therefore the base these hang off. See
+    /// `SenderEndpoint::payments_terminals`.
+    const fn sub_path(self) -> Option<&'static str> {
+        match self {
+            Self::PaymentTerminals => Some("terminals"),
+            Self::FinancialAdviceConfirmations => Some("financial-advice-confirmations"),
+            _ => None,
         }
     }
 }
@@ -238,7 +309,10 @@ fn run(cli: Cli) -> Fallible {
             conformance(&url, &token, unencoded_token, limit, !no_auth_checks, no_fail, cli.insecure),
         ),
         Command::Pull { module, url, token, from, since, limit, max } => {
-            block_on(pull(module.into(), &url, &token, &from, since.as_deref(), limit, max, cli.insecure))
+            block_on(pull(module, &url, &token, &from, since.as_deref(), limit, max, cli.insecure))
+        }
+        Command::ServeMock { bind, base_url, role, version, empty } => {
+            block_on(serve_mock(&bind, base_url.as_deref(), role, version.into(), !empty))
         }
     }
 }
@@ -357,12 +431,14 @@ fn price(
     };
     let breakdown = PricingEngine::with_policy(policy).price(&session, &tariffs)?;
 
+    let claimed = cdr.total_cost.before_taxes;
+    let agrees = claimed == breakdown.total_excl_vat;
+
     if as_json {
         println!("{}", serde_json::to_string_pretty(&breakdown)?);
     } else {
         println!("{breakdown}");
-        let claimed = cdr.total_cost.before_taxes;
-        if claimed == breakdown.total_excl_vat {
+        if agrees {
             println!("\nthe CDR's own total agrees");
         } else {
             println!(
@@ -371,8 +447,27 @@ fn price(
             );
         }
     }
+
+    // Exit non-zero when the invoice does not check out, so this can be a pipeline step rather
+    // than something a person has to read. A note is enough on its own: a CDR whose Charging
+    // Periods span a price change can total correctly by luck and still be malformed.
+    if !agrees || breakdown.needs_review() {
+        return Err(Box::new(PricingDisagreement));
+    }
     Ok(())
 }
+
+/// The CDR did not price to what it claims, or priced with findings.
+#[derive(Debug)]
+struct PricingDisagreement;
+
+impl std::fmt::Display for PricingDisagreement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the CDR did not reconcile; see the breakdown above")
+    }
+}
+
+impl std::error::Error for PricingDisagreement {}
 
 fn convert(
     path: &std::path::Path,
@@ -567,7 +662,7 @@ async fn conformance(
 
 #[allow(clippy::too_many_arguments)]
 async fn pull(
-    module: ModuleId,
+    module: PullModule,
     url: &str,
     token: &str,
     from: &str,
@@ -577,7 +672,7 @@ async fn pull(
     insecure: bool,
 ) -> Fallible {
     let client = client_for(insecure)?;
-    let peer = Registration::new(Url::new(url)?, CredentialsToken::new(token)?)
+    let details = Registration::new(Url::new(url)?, CredentialsToken::new(token)?)
         .discover(client.transport())
         .await?
         .select_best(client.transport())
@@ -586,8 +681,10 @@ async fn pull(
         .details()
         .clone();
 
-    let peer = ocpi_kit::client::Peer::builder(VersionNumber::V2_3_0, CredentialsToken::new(token)?)
-        .endpoints_from(&peer)
+    // The version that was negotiated, not the one this build prefers: it decides the
+    // interoperability quirks and, for a typed pull, the translation into the canonical model.
+    let peer = ocpi_kit::client::Peer::builder(details.version.clone(), CredentialsToken::new(token)?)
+        .endpoints_from(&details)
         .build();
 
     let mut query = PageQuery::new();
@@ -599,8 +696,16 @@ async fn pull(
     }
 
     let from: ocpi_kit::types::PartyRef = from.parse()?;
-    let client_module = peer.module(client.transport(), module, from);
-    let mut stream = client_module.list::<serde_json::Value>(query)?;
+    let client_module = peer.module(client.transport(), module.module(), from);
+    let mut stream = match module.sub_path() {
+        None => client_module.list::<serde_json::Value>(query)?,
+        Some(segment) => {
+            let endpoint = client_module
+                .sender_endpoint()
+                .ok_or("the peer does not implement the Sender interface of this module")?;
+            client_module.list_from::<serde_json::Value>(&endpoint.base().join(segment), &query)
+        }
+    };
     let mut count = 0usize;
     while let Some(object) = stream.next().await? {
         println!("{}", serde_json::to_string(&object)?);
@@ -616,3 +721,49 @@ async fn pull(
     );
     Ok(())
 }
+
+/// Serves a conformant OCPI party out of memory.
+///
+/// The point is the *other* side of an integration: a partner writing a client has nothing to
+/// point it at until you are ready, and what they need is not a fixture file but an endpoint that
+/// paginates, filters, refuses a write under the wrong party and answers `2004` for a token it
+/// does not know. That is [`MockPeer`](ocpi_kit::testkit::MockPeer), and this is it on a socket.
+async fn serve_mock(
+    bind: &str,
+    base_url: Option<&str>,
+    role: MockRole,
+    version: VersionNumber,
+    seeded: bool,
+) -> Fallible {
+    use ocpi_kit::server::OcpiRouter;
+    use ocpi_kit::testkit::MockPeer;
+
+    let listener = tokio::net::TcpListener::bind(bind).await?;
+    let address = listener.local_addr()?;
+    // The base URL is what the generated version details publish, so it has to be what a partner
+    // can actually reach — which is not necessarily what we bound to.
+    let base = Url::new_lenient(base_url.map_or_else(|| format!("http://{address}"), ToOwned::to_owned));
+
+    let peer = match role {
+        MockRole::Cpo => MockPeer::cpo(base.clone()),
+        MockRole::Emsp => MockPeer::msp(base.clone()),
+    };
+    let peer = if seeded { peer.seeded() } else { peer };
+    let app = peer.mount(OcpiRouter::new(version.clone(), base.clone(), peer.token_store())).build();
+
+    eprintln!("ocpi-kit mock {role:?} speaking OCPI {version} as {}", peer.party());
+    eprintln!("  listening on   http://{address}");
+    eprintln!("  published as   {base}");
+    eprintln!("  versions       {}", base.join("versions"));
+    eprintln!("  token          {} (also -a, as CREDENTIALS_TOKEN_A)", ocpi_kit::testkit::test_token("c"));
+    eprintln!();
+    eprintln!("  ocpi conformance {} --token {}", base.join("versions"), TOKEN_C);
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+/// The mock's credentials token, in the clear: it is a published constant, not a secret.
+///
+/// `CredentialsToken` redacts itself in `Display` — which is right everywhere else and unhelpful
+/// in the one line whose job is to tell a partner what to send.
+const TOKEN_C: &str = "test-token-c";

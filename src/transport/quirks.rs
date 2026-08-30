@@ -1,12 +1,29 @@
 //! `Quirks` — per-peer interoperability flags, each with the sentence that makes it necessary.
 //!
-//! Nobody publishes this knowledge. Every team that ships an OCPI integration rediscovers that
-//! one partner does not Base64 its tokens, another puts a trailing slash on every endpoint URL,
-//! and a third sends `"data": null` where the spec says a list. Encoding that as a documented,
-//! testable per-peer profile is the difference between a library and a support ticket.
+//! Every OCPI integration rediscovers that one partner does not Base64 its tokens, another puts a
+//! trailing slash on every endpoint URL, and a third sends `"data": null` where the spec says a
+//! list. This is that knowledge as a documented, testable per-peer profile.
 //!
-//! Every flag names the spec text that makes it defensible. A flag with no such basis is a bug
-//! in the peer that should be reported, not accommodated silently.
+//! Every flag names the spec text that makes it defensible. A flag with no such basis is a bug in
+//! the peer that should be reported, not accommodated silently.
+//!
+//! # Every flag here changes behaviour
+//!
+//! A configuration field that does nothing is worse than a missing feature: somebody sets it,
+//! believes the problem is handled, and ships. So this struct holds only flags that are read
+//! somewhere, and `cargo run -p xtask -- dead-config` fails the build if one stops being.
+//!
+//! Several accommodations this crate *does* make are deliberately **not** flags, because they are
+//! unconditional and there is no coherent way to turn them off:
+//!
+//! * A trailing slash on a discovered URL is normalised by
+//!   [`Url::join`](crate::types::Url::join) whatever anyone configures.
+//! * An explicit `null` decodes to `None` because that is what `Option<T>` means in serde.
+//! * An over-long identifier is always accepted and always reported — that is the crate's
+//!   governing rule, not a per-peer setting; see [`types::validate`](crate::types::validate).
+//! * `#NA` is recognised by [`CiString::is_not_available`](crate::types::CiString::is_not_available)
+//!   wherever a caller asks. Whether a `#NA` in a given field is acceptable is a question about
+//!   that field, not about the peer, so it belongs at the call site.
 
 use crate::VersionNumber;
 
@@ -52,50 +69,20 @@ pub struct Quirks {
     /// Spec: 2.3.0 §transport_and_format_message_routing (introduced in 2.2)
     pub omit_routing_headers: bool,
 
-    /// Tolerate a trailing slash on discovered endpoint URLs and `Link` headers.
-    ///
-    /// The spec's own pagination examples show `…/cdrs/?offset=150`, while its endpoint examples
-    /// show `…/cdrs`. Both occur in the wild; joining is done by
-    /// [`Url::join`](crate::types::Url::join), which normalises either way.
-    pub trailing_slash: bool,
-
-    /// Treat an explicit `null` as an absent field.
-    ///
-    /// Default **on**: the spec itself advises accepting `data` *"being absent"* or *"present
-    /// with any possible value"*, and peers extend that habit to object fields.
-    ///
-    /// Spec: 2.3.0 §transport_and_format_response_format
-    pub null_means_absent: bool,
-
-    /// Recognise the `#NA` sentinel in string fields.
-    ///
-    /// > *There are rare situation … where a certain field, that is required, cannot be filled.
-    /// > In such cases, and only in such cases, it is allowed to set a string field to the value
-    /// > `#NA`.*
-    ///
-    /// Default **on**: this is specified behaviour, not a deviation. The flag exists so a party
-    /// that wants to reject `#NA` outright can.
-    ///
-    /// Spec: 2.3.0 §transport_and_format_not_available
-    pub na_sentinel: bool,
-
     /// Match module identifiers ignoring ASCII case when reading version details.
     ///
     /// Default **on**. The Bookings module identifier is `Booking` — singular and mixed case,
     /// unlike every other module — and implementations differ on it.
     pub case_insensitive_module_ids: bool,
 
-    /// Clamp an outgoing `limit` to this value.
+    /// Clamp an outgoing `limit` to what **the peer** tolerates.
     ///
     /// Some peers answer a large `limit` with an error instead of the smaller page the spec
     /// prescribes. When the peer's `X-Limit` is known, prefer that.
-    pub max_page_limit: Option<u64>,
-
-    /// Accept an over-long identifier without complaint.
     ///
-    /// 2.1.1 gave `CDR.id` 36 characters; some vendor code emits 39 there because that is the
-    /// 2.2.1 length. The value is preserved either way — this only silences the validator.
-    pub lenient_id_length: bool,
+    /// Named for the side it describes: `ServerConfig::max_page_limit` is the cap *this* process
+    /// puts on the pages it serves, and the two are opposite ends of the same wire.
+    pub peer_max_page_limit: Option<u64>,
 
     /// Accept a `Content-Type` other than `application/json` on a request with a body.
     ///
@@ -113,12 +100,8 @@ impl Default for Quirks {
             accept_unencoded_token: false,
             send_unencoded_token: false,
             omit_routing_headers: false,
-            trailing_slash: true,
-            null_means_absent: true,
-            na_sentinel: true,
             case_insensitive_module_ids: true,
-            max_page_limit: None,
-            lenient_id_length: false,
+            peer_max_page_limit: None,
             lenient_content_type: false,
         }
     }
@@ -131,13 +114,7 @@ impl Quirks {
     /// rather than being quietly accommodated.
     #[must_use]
     pub fn strict() -> Self {
-        Self {
-            trailing_slash: false,
-            null_means_absent: false,
-            na_sentinel: false,
-            case_insensitive_module_ids: false,
-            ..Self::default()
-        }
+        Self { case_insensitive_module_ids: false, ..Self::default() }
     }
 
     /// Everything relaxed. For talking to a peer whose behaviour is not yet known.
@@ -145,15 +122,14 @@ impl Quirks {
     pub fn permissive() -> Self {
         Self {
             accept_unencoded_token: true,
+            case_insensitive_module_ids: true,
+            lenient_content_type: true,
+            // Not relaxed even here: sending an unencoded token, or dropping the routing
+            // headers, is not leniency towards the peer — it is this side becoming the
+            // non-conformant one. `for_version` turns those on where the version requires it.
             send_unencoded_token: false,
             omit_routing_headers: false,
-            trailing_slash: true,
-            null_means_absent: true,
-            na_sentinel: true,
-            case_insensitive_module_ids: true,
-            max_page_limit: None,
-            lenient_id_length: true,
-            lenient_content_type: true,
+            peer_max_page_limit: None,
         }
     }
 
@@ -181,15 +157,15 @@ impl Quirks {
 
     /// This profile with the peer's advertised `X-Limit` applied as the page-size cap.
     #[must_use]
-    pub fn with_max_page_limit(mut self, limit: u64) -> Self {
-        self.max_page_limit = Some(limit);
+    pub fn with_peer_max_page_limit(mut self, limit: u64) -> Self {
+        self.peer_max_page_limit = Some(limit);
         self
     }
 
     /// The page size to ask for, given what the caller wants.
     #[must_use]
     pub fn effective_limit(&self, requested: Option<u64>) -> Option<u64> {
-        match (requested, self.max_page_limit) {
+        match (requested, self.peer_max_page_limit) {
             (Some(r), Some(max)) => Some(r.min(max)),
             (Some(r), None) => Some(r),
             (None, max) => max,
@@ -207,10 +183,9 @@ mod tests {
         assert!(!q.accept_unencoded_token, "2.2-d2 and later require Base64");
         assert!(!q.send_unencoded_token);
         assert!(!q.omit_routing_headers);
-        assert!(!q.lenient_id_length);
-        // These two are specified behaviour, so they are on by default.
-        assert!(q.null_means_absent);
-        assert!(q.na_sentinel);
+        assert!(!q.lenient_content_type);
+        // The Bookings module identifier really is spelled two ways in the wild.
+        assert!(q.case_insensitive_module_ids);
     }
 
     #[test]
@@ -230,7 +205,7 @@ mod tests {
 
     #[test]
     fn page_limits_are_clamped_to_what_the_peer_tolerates() {
-        let q = Quirks::default().with_max_page_limit(100);
+        let q = Quirks::default().with_peer_max_page_limit(100);
         assert_eq!(q.effective_limit(Some(2000)), Some(100));
         assert_eq!(q.effective_limit(Some(10)), Some(10));
         assert_eq!(q.effective_limit(None), Some(100));
@@ -238,8 +213,11 @@ mod tests {
     }
 
     #[test]
-    fn the_strict_profile_turns_off_even_the_specified_leniencies() {
+    fn the_strict_profile_accommodates_nothing() {
+        // What a conformance run wants: anything the peer gets wrong shows up as an error rather
+        // than being quietly absorbed.
         let q = Quirks::strict();
-        assert!(!q.null_means_absent && !q.na_sentinel && !q.trailing_slash);
+        assert!(!q.case_insensitive_module_ids);
+        assert!(!q.accept_unencoded_token && !q.lenient_content_type);
     }
 }

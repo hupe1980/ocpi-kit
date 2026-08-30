@@ -63,10 +63,14 @@ a complete list.
 
 * The **client** validates outgoing objects by default (`ClientConfig::validate_outgoing`), so a
   non-conformant object is caught at your process boundary rather than at a partner's support desk.
+  It is a setting, because a hub that must relay a slightly-wrong object unchanged is a legitimate
+  use.
 * The **server** validates incoming bodies and answers with the specification's own status codes.
-
-Both are settings, because a hub that must relay a slightly-wrong object unchanged is a legitimate
-use.
+* The **server also validates what it is about to answer with**, logs every violation at `warn` by
+  JSON Pointer, and sends it anyway. Refusing a `GET` because one Location in a page of a hundred
+  has a 46-character name turns your data quality into an outage on the partner's side; serving it
+  silently is how it becomes their support ticket. A handler that would rather refuse calls
+  `validate()` itself and returns `OcpiError::Invalid`.
 
 ## Construct strictly
 

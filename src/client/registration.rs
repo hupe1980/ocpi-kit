@@ -30,6 +30,7 @@
 
 use http::Method;
 
+use crate::convert::wire::ObjectKind;
 use crate::transport::{CredentialsToken, OcpiError, OcpiRequest, Quirks};
 use crate::types::{PartyRef, Url};
 use crate::v2_3_0::credentials::Credentials;
@@ -230,8 +231,8 @@ impl Selected {
                 "peer advertised no credentials endpoint, which every implementation must have".to_owned(),
             ),
         })?;
-        let request = OcpiRequest::new(Method::POST, url, ModuleId::Credentials).with_body(credentials)?;
-        let theirs: Credentials = transport.send(&request, &self.token_a, &self.quirks).await?;
+        let request = self.credentials_request(Method::POST, url, credentials)?;
+        let theirs = self.their_credentials(transport, &request, &self.token_a).await?;
         Ok(peer_from(self.version, self.quirks, self.versions_url, &self.details, &theirs))
     }
 
@@ -256,9 +257,60 @@ impl Selected {
             status_code: crate::transport::StatusCode::NO_MATCHING_ENDPOINTS,
             status_message: Some("peer advertised no credentials endpoint".to_owned()),
         })?;
-        let request = OcpiRequest::new(Method::PUT, url, ModuleId::Credentials).with_body(credentials)?;
-        let theirs: Credentials = transport.send(&request, current_token, &self.quirks).await?;
+        let request = self.credentials_request(Method::PUT, url, credentials)?;
+        let theirs = self.their_credentials(transport, &request, current_token).await?;
         Ok(peer_from(self.version, self.quirks, self.versions_url, &self.details, &theirs))
+    }
+
+    /// A credentials request whose body is written in the version that was negotiated.
+    ///
+    /// The handshake is the one exchange that happens *before* there is a [`Peer`] to ask, so the
+    /// version comes from [`Discovered::select`] instead. It matters: a 2.2.1 `Credentials` has no
+    /// `hub_party_id`, and its `Role` enum still has `HUB`, which the 2.3.0 one does not — so
+    /// registering with a 2.2.1 hub without translating fails to decode the answer.
+    fn credentials_request(
+        &self,
+        method: Method,
+        url: Url,
+        credentials: &Credentials,
+    ) -> Result<OcpiRequest, OcpiError> {
+        let request = OcpiRequest::new(method, url, ModuleId::Credentials);
+        match self.bridge_out(credentials)? {
+            Some(value) => request.with_body(&value),
+            None => request.with_body(credentials),
+        }
+    }
+
+    fn bridge_out(&self, credentials: &Credentials) -> Result<Option<serde_json::Value>, OcpiError> {
+        if self.version == crate::CANONICAL_VERSION {
+            return Ok(None);
+        }
+        let value = serde_json::to_value(credentials)
+            .map_err(|e| OcpiError::Decode { path: "/".to_owned(), message: e.to_string() })?;
+        let converted = ObjectKind::Credentials
+            .bridge(&crate::CANONICAL_VERSION, &self.version, value)
+            .map_err(|e| OcpiError::Unsupported(e.to_string()))?;
+        if let Some(note) = converted.lossy.to_status_message() {
+            tracing::warn!(ocpi.peer_version = %self.version, "{note}");
+        }
+        Ok(Some(converted.value))
+    }
+
+    async fn their_credentials(
+        &self,
+        transport: &Transport,
+        request: &OcpiRequest,
+        token: &CredentialsToken,
+    ) -> Result<Credentials, OcpiError> {
+        if self.version == crate::CANONICAL_VERSION {
+            return transport.send(request, token, &self.quirks).await;
+        }
+        let value: serde_json::Value = transport.send(request, token, &self.quirks).await?;
+        let converted = ObjectKind::Credentials
+            .bridge(&self.version, &crate::CANONICAL_VERSION, value)
+            .map_err(|e| OcpiError::Unsupported(e.to_string()))?;
+        serde_json::from_value(converted.value)
+            .map_err(|e| OcpiError::Decode { path: "/".to_owned(), message: e.to_string() })
     }
 }
 

@@ -54,7 +54,9 @@
 
 use core::fmt;
 
-use crate::transport::{CredentialsToken, OcpiError, OcpiRequest, PageQuery, Quirks, RequestIds, StatusCode};
+use crate::transport::{
+    CredentialsToken, OcpiError, OcpiRequest, Page, PageQuery, Quirks, RequestIds, StatusCode,
+};
 use crate::types::{DateTime, Url, Validate};
 use crate::v2_3_0::versions::{Version, VersionDetails};
 use crate::{InterfaceRole, ModuleId, VersionNumber};
@@ -654,6 +656,118 @@ impl Conformance {
         }
 
         Self::check_objects(report, module, &page.items);
+        self.check_offset(transport, report, module, url, &page).await;
+        self.check_date_from(transport, report, module, url, &page).await;
+    }
+
+    /// Whether the peer actually applies `offset`.
+    ///
+    /// A peer that ignores it answers every page with the same objects, which is not a wrong
+    /// answer so much as an endless one: a client following `Link: rel="next"` never terminates,
+    /// and `DEFAULT_MAX_PAGES` is the only thing between it and a loop. Nothing in a single page
+    /// reveals this, which is why it belongs in a conformance run rather than in a client.
+    ///
+    /// > *Example: With offset=0 and limit=10 the server shall return the first 10 records (if 10
+    /// > objects match the request). Then the next page starts with offset=10.*
+    async fn check_offset(
+        &self,
+        transport: &Transport,
+        report: &mut Report,
+        module: &ModuleId,
+        url: &Url,
+        first: &Page<serde_json::Value>,
+    ) {
+        const SPEC: &str = "2.3.0 §transport_and_format_pagination";
+        let title = format!("{module} applies the offset parameter");
+        if first.items.len() < 2 {
+            report.skip("module.offset", &title, "fewer than two objects to distinguish", SPEC);
+            return;
+        }
+        let query = PageQuery::new().with_offset(1).with_limit(1);
+        let request = OcpiRequest::new(http::Method::GET, query.apply_to(url), module.clone())
+            .with_ids(RequestIds::generate());
+        match transport.send_page::<serde_json::Value>(&request, &self.token, &self.quirks).await {
+            Err(e) => report.fail("module.offset", &title, e.to_string(), SPEC),
+            Ok(second) => match second.items.first() {
+                None => report.warn(
+                    "module.offset",
+                    &title,
+                    "offset=1&limit=1 returned nothing, although the unfiltered page had at least two                      objects",
+                    SPEC,
+                ),
+                Some(item) => report.assert(
+                    "module.offset",
+                    &title,
+                    *item == first.items[1],
+                    if *item == first.items[0] {
+                        "offset=1 returned the object at offset 0; a crawl over this endpoint would                          never terminate"
+                            .to_owned()
+                    } else {
+                        "offset=1 returned an object, though not the second of the first page —                          acceptable if the set changed between the two requests"
+                            .to_owned()
+                    },
+                    SPEC,
+                ),
+            },
+        }
+    }
+
+    /// Whether the peer actually applies `date_from`.
+    ///
+    /// > *`date_from`: Only return objects that have `last_updated` after or equal to this
+    /// > Date/Time (inclusive).*
+    ///
+    /// A peer that ignores it turns every incremental pull into a full one. The cost is invisible
+    /// — the data is correct — until a partner with a million CDRs wonders why a nightly sync
+    /// takes six hours.
+    async fn check_date_from(
+        &self,
+        transport: &Transport,
+        report: &mut Report,
+        module: &ModuleId,
+        url: &Url,
+        first: &Page<serde_json::Value>,
+    ) {
+        const SPEC: &str = "2.3.0 §transport_and_format_pagination";
+        let title = format!("{module} applies the date_from filter");
+        let Some(newest) = first.items.iter().filter_map(last_updated).max() else {
+            report.skip("module.date_from", &title, "no object carried a usable last_updated", SPEC);
+            return;
+        };
+        // One second *past* the newest object this peer just showed us. A peer that applies the
+        // filter answers with nothing, or with whatever changed in between; a peer that ignores it
+        // hands back the same page, every object of which is now demonstrably too old. Filtering
+        // at `newest` itself would prove nothing when a page's objects share a timestamp, which
+        // is the normal case for a bulk import.
+        let Ok(after) = DateTime::from_unix_timestamp(newest.unix_timestamp() + 1) else {
+            report.skip("module.date_from", &title, "the newest timestamp is at the end of time", SPEC);
+            return;
+        };
+        let query = PageQuery::since(after).with_limit(self.page_limit);
+        let request = OcpiRequest::new(http::Method::GET, query.apply_to(url), module.clone())
+            .with_ids(RequestIds::generate());
+        match transport.send_page::<serde_json::Value>(&request, &self.token, &self.quirks).await {
+            Err(e) => report.fail("module.date_from", &title, e.to_string(), SPEC),
+            Ok(filtered) => {
+                let stale = filtered.items.iter().filter_map(last_updated).filter(|t| *t < after).count();
+                let total = filtered.items.len();
+                report.assert(
+                    "module.date_from",
+                    &title,
+                    stale == 0,
+                    if stale == 0 {
+                        format!("asked for last_updated >= {after}, got {total} object(s), none older")
+                    } else {
+                        format!(
+                            "asked for last_updated >= {after}, got {stale} of {total} object(s) older \
+                             than that; a peer that ignores date_from turns every incremental pull \
+                             into a full one"
+                        )
+                    },
+                    SPEC,
+                );
+            }
+        }
     }
 
     /// Re-decodes the page as the typed object and validates each one.
@@ -753,6 +867,13 @@ impl Conformance {
             SPEC,
         );
     }
+}
+
+/// The `last_updated` of an object, whatever module it belongs to.
+///
+/// Every OCPI object that a Sender interface lists carries one; it is what `date_from` filters on.
+fn last_updated(object: &serde_json::Value) -> Option<DateTime> {
+    object.get("last_updated")?.as_str()?.parse().ok()
 }
 
 #[cfg(test)]

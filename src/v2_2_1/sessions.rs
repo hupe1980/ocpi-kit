@@ -128,6 +128,12 @@ impl Validate for Session {
             status,
             last_updated,
         );
+        crate::v2_3_0::cdrs::validate_period_sequence(
+            &self.charging_periods.iter().map(|p| p.start_date_time).collect::<Vec<_>>(),
+            self.start_date_time,
+            self.end_date_time,
+            v,
+        );
         if self.end_date_time.is_some_and(|end| end < self.start_date_time) {
             v.report_at(
                 "end_date_time",

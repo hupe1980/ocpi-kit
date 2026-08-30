@@ -277,6 +277,13 @@ impl Validate for Cdr {
             );
         }
 
+        validate_period_sequence(
+            &self.charging_periods.iter().map(|p| p.start_date_time).collect::<Vec<_>>(),
+            self.start_date_time,
+            Some(self.end_date_time),
+            v,
+        );
+
         if self.total_parking_time.is_some_and(|p| p > self.total_time) {
             v.report_at(
                 "total_parking_time",
@@ -485,6 +492,63 @@ impl Validate for ChargingPeriod {
     }
 }
 
+/// Checks that a list of Charging Periods is a sequence a session could actually have had.
+///
+/// # Why this is worth checking
+///
+/// Nothing in the property tables says the periods are ordered, but everything built on them
+/// assumes it. `step_size` is defined in terms of *"the last relevant PriceComponent"* and
+/// *"the last time-based period"*; a period's duration is only knowable as the gap to the next
+/// one; and a pricing engine reading them out of order will quietly bill the wrong rate.
+///
+/// It is also the failure that shows up in practice. Charging periods arrive from a CSMS through
+/// a CPO's own aggregation, and a merge that loses the sort is invisible in every field-by-field
+/// check — the objects are all individually valid.
+///
+/// So this reports three things, each as a [`ViolationCode::Inconsistent`] at the offending
+/// index: a period that does not start after the one before it, one that starts before the
+/// session did, and one that starts at or after the session ended.
+///
+/// Spec: 2.3.0 §mod_cdrs_cdr_object, §mod_cdrs_step_size
+pub fn validate_period_sequence(
+    starts: &[DateTime],
+    session_start: DateTime,
+    session_end: Option<DateTime>,
+    v: &mut Validator,
+) {
+    let mut previous: Option<DateTime> = None;
+    for (i, start) in starts.iter().copied().enumerate() {
+        let at = |v: &mut Validator, message: String| {
+            v.enter("charging_periods");
+            v.enter(&i.to_string());
+            v.report_at("start_date_time", ViolationCode::Inconsistent, message);
+            v.leave();
+            v.leave();
+        };
+        if let Some(previous) = previous
+            && start <= previous
+        {
+            at(
+                v,
+                format!(
+                    "is {start}, which is not after the previous period's {previous}; \
+                     charging periods have to be in order for `step_size` and for a period's \
+                     own duration to mean anything"
+                ),
+            );
+        }
+        if start < session_start {
+            at(v, format!("is {start}, before the session started at {session_start}"));
+        }
+        if let Some(end) = session_end
+            && start >= end
+        {
+            at(v, format!("is {start}, at or after the session ended at {end}"));
+        }
+        previous = Some(start);
+    }
+}
+
 /// One measured quantity within a [`ChargingPeriod`].
 ///
 /// Spec: 2.3.0 §mod_cdrs_cdrdimension_class
@@ -649,6 +713,20 @@ ocpi_enum! {
         Power = "POWER",
         /// Time the EVSE has been reserved and not yet in use for this customer, in hours.
         ReservationTime = "RESERVATION_TIME",
+        /// Time a reservation was held that then **expired**, in hours.
+        ///
+        /// From the 2.3.0 `bookings` branch, which core 2.3.0 does not have. Declared
+        /// unconditionally rather than behind the feature because this enum is **closed**: a
+        /// booking-aware CPO sending it would otherwise make the whole CDR undecodable.
+        ///
+        /// Spec: 2.3.0-bookings §mod_cdrs_cdrdimensiontype_enum
+        ReservationExpires = "RESERVATION_EXPIRES",
+        /// Time the session continued **after** the reserved slot ended, in hours.
+        ///
+        /// Also from the `bookings` branch, and unconditional for the same reason.
+        ///
+        /// Spec: 2.3.0-bookings §mod_cdrs_cdrdimensiontype_enum
+        ReservationOvertime = "RESERVATION_OVERTIME",
         /// Current state of charge of the EV, in percent, 0 to 100.
         StateOfCharge = "STATE_OF_CHARGE",
         /// Time charging in this period, in hours.
@@ -687,9 +765,108 @@ impl CdrDimensionType {
             Self::Current | Self::MaxCurrent | Self::MinCurrent => "A",
             Self::Energy | Self::EnergyExport | Self::EnergyImport => "kWh",
             Self::MaxPower | Self::MinPower | Self::Power => "kW",
-            Self::ParkingTime | Self::ReservationTime | Self::Time => "h",
+            Self::ParkingTime
+            | Self::ReservationTime
+            | Self::ReservationExpires
+            | Self::ReservationOvertime
+            | Self::Time => "h",
             Self::StateOfCharge => "%",
         }
+    }
+}
+
+#[cfg(test)]
+mod dimension_tests {
+    use super::*;
+
+    /// The `bookings` branch's two reservation dimensions, on a **closed** enum: a missing value
+    /// here makes the whole CDR undecodable rather than degrading. No fixture uses them, so only
+    /// `xtask enum-coverage` sees the gap.
+    #[test]
+    fn the_bookings_branch_reservation_dimensions_decode() {
+        for (wire, expected, unit) in [
+            ("RESERVATION_TIME", CdrDimensionType::ReservationTime, "h"),
+            ("RESERVATION_EXPIRES", CdrDimensionType::ReservationExpires, "h"),
+            ("RESERVATION_OVERTIME", CdrDimensionType::ReservationOvertime, "h"),
+        ] {
+            let decoded: CdrDimensionType =
+                serde_json::from_str(&format!("\"{wire}\"")).unwrap_or_else(|e| panic!("{wire}: {e}"));
+            assert_eq!(decoded, expected);
+            assert_eq!(serde_json::to_string(&decoded).expect("serialises"), format!("\"{wire}\""));
+            assert_eq!(decoded.unit(), unit);
+            assert!(!decoded.is_session_only(), "{wire} has no Session-Only mark in the branch table");
+        }
+    }
+}
+
+#[cfg(test)]
+mod period_sequence_tests {
+    use super::*;
+    use crate::types::Violation;
+
+    fn dt(s: &str) -> DateTime {
+        s.parse().expect("a valid timestamp")
+    }
+
+    fn check(starts: &[&str], start: &str, end: Option<&str>) -> Vec<Violation> {
+        let mut v = Validator::new();
+        validate_period_sequence(
+            &starts.iter().map(|s| dt(s)).collect::<Vec<_>>(),
+            dt(start),
+            end.map(dt),
+            &mut v,
+        );
+        v.finish().into_vec()
+    }
+
+    #[test]
+    fn a_well_formed_sequence_is_accepted() {
+        assert!(
+            check(
+                &["2024-01-15T10:00:00Z", "2024-01-15T10:30:00Z", "2024-01-15T11:00:00Z"],
+                "2024-01-15T10:00:00Z",
+                Some("2024-01-15T11:30:00Z"),
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn periods_out_of_order_are_reported_at_the_offending_index() {
+        // The failure a merge of two period streams produces: everything is individually valid.
+        let found = check(
+            &["2024-01-15T10:00:00Z", "2024-01-15T11:00:00Z", "2024-01-15T10:30:00Z"],
+            "2024-01-15T10:00:00Z",
+            Some("2024-01-15T12:00:00Z"),
+        );
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].pointer, "/charging_periods/2/start_date_time");
+        assert_eq!(found[0].code, ViolationCode::Inconsistent);
+    }
+
+    #[test]
+    fn two_periods_at_the_same_instant_are_reported() {
+        // Not merely unordered: a zero-length period has no duration to price.
+        let found = check(&["2024-01-15T10:00:00Z", "2024-01-15T10:00:00Z"], "2024-01-15T10:00:00Z", None);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].pointer, "/charging_periods/1/start_date_time");
+    }
+
+    #[test]
+    fn a_period_outside_the_session_is_reported() {
+        let before = check(&["2024-01-15T09:00:00Z"], "2024-01-15T10:00:00Z", None);
+        assert_eq!(before.len(), 1);
+        assert!(before[0].message.contains("before the session started"), "{:?}", before[0]);
+
+        let after = check(&["2024-01-15T13:00:00Z"], "2024-01-15T10:00:00Z", Some("2024-01-15T12:00:00Z"));
+        assert_eq!(after.len(), 1);
+        assert!(after[0].message.contains("after the session ended"), "{:?}", after[0]);
+    }
+
+    #[test]
+    fn an_empty_or_single_period_list_has_nothing_to_disagree_with() {
+        assert!(check(&[], "2024-01-15T10:00:00Z", None).is_empty());
+        assert!(check(&["2024-01-15T10:00:00Z"], "2024-01-15T10:00:00Z", None).is_empty());
     }
 }
 

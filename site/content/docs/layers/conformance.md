@@ -13,6 +13,9 @@ $ export OCPI_TOKEN=…            # the CREDENTIALS_TOKEN_C of an existing regi
 $ ocpi conformance https://cpo.example.com/ocpi/versions
 ```
 
+Nothing to point it at yet? [`ocpi serve-mock`](@/docs/getting-started/cli.md) runs a conformant
+peer, and this crate's test suite requires that this runner finds nothing wrong with it.
+
 ```text
 [+] versions.status   GET /versions returns status_code 1000
                       got 1000
@@ -50,25 +53,39 @@ everything downstream for reasons that are hard to read.
 
 | Check | The rule |
 |---|---|
-| `versions.get` / `versions.status` | `/versions` answers, with a `1000` envelope |
+| `versions.get` / `versions.status` / `versions.data` | `/versions` answers, with a `1000` envelope carrying a version list |
 | `versions.nonempty` / `versions.unique` | at least one version, each listed once |
 | `versions.url` | every advertised URL passes the `UrlPolicy` |
 | `versions.common` | at least one version this build speaks |
-| `details.get` / `details.version` | the details fetch, and name the version they were fetched for |
-| `endpoints.credentials` | the credentials module is offered — every implementation must have it |
+| `details.get` / `details.data` / `details.version` | the details fetch, carry a payload, and name the version they were fetched for |
+| `endpoints.nonempty` / `endpoints.credentials` | at least one endpoint, and the credentials module among them — every implementation must have it |
 | `endpoints.unique` | no `(module, role)` pair listed twice |
 | `endpoints.known` | no module advertised that does not exist in that version |
 | `endpoints.absolute` | every endpoint URL is absolute |
+| `details.conform` | the version-details object itself conforms |
 | `headers.request_id` / `headers.correlation_id` | both echoed on the response |
 | `headers.timestamp` | the envelope timestamp is within the clock skew you allow |
-| `auth.empty` / `auth.wrong` | an unauthenticated or wrong-token read is refused |
+| `auth.empty` / `auth.wrong` / `auth.unauthenticated` | a missing, malformed or wrong credentials token is refused |
 | `module.page` | each offered Sender interface returns a decodable page |
 | `module.limit` / `module.xlimit` | the requested `limit` is never exceeded, and `X-Limit` agrees |
-| `module.link` | `Link: rel="next"` appears exactly when `X-Total-Count` says there is more |
+| `module.link` / `module.total` | `X-Total-Count` is sent, and `Link: rel="next"` appears exactly when it says there is more |
 | `module.objects` | the objects on the page conform |
+| `module.offset` | `offset` is actually applied |
+| `module.date_from` | `date_from` is actually applied |
 
 Every check names the specification anchor it comes from, so a failing line pastes straight into a
 ticket without anyone having to look up the clause.
+
+### The last two
+
+Every other check is visible in a single response. These are not: a peer that ignores `offset`
+answers each page correctly and with the same objects, so a client following `Link: rel="next"`
+never terminates. A peer that ignores `date_from` returns everything it has every time — also
+correct, and it turns a partner's incremental pull into a full one.
+
+Each costs one extra `GET` per module and both stay read-only. The `date_from` probe asks for one
+second *past* the newest object the peer just showed, because filtering at the newest timestamp
+proves nothing when a page's objects share one.
 
 ## Outcomes
 

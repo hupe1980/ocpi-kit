@@ -34,6 +34,7 @@ pub struct InvalidString {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Reason {
     TooLong { len: usize, max: usize },
+    WrongLength { len: usize, expected: usize },
     NonPrintable { at: usize, ch: char },
     NonAscii { at: usize, ch: char },
 }
@@ -41,6 +42,13 @@ enum Reason {
 impl InvalidString {
     pub(crate) const fn too_long(len: usize, max: usize, kind: StringKind) -> Self {
         Self { kind, reason: Reason::TooLong { len, max } }
+    }
+
+    /// For a field the specification fixes at one exact length, such as the five-character
+    /// `hub_party_id`. Reporting a short value as "too long" is not a smaller mistake than
+    /// reporting nothing.
+    pub(crate) const fn wrong_length(len: usize, expected: usize, kind: StringKind) -> Self {
+        Self { kind, reason: Reason::WrongLength { len, expected } }
     }
 
     /// Whether the string was rejected only because it was too long.
@@ -62,6 +70,9 @@ impl fmt::Display for InvalidString {
         match self.reason {
             Reason::TooLong { len, max } => {
                 write!(f, "{name}({max}) cannot hold {len} characters")
+            }
+            Reason::WrongLength { len, expected } => {
+                write!(f, "{name} must be exactly {expected} characters, not {len}")
             }
             Reason::NonPrintable { at, ch } => write!(
                 f,

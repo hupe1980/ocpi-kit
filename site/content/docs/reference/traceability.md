@@ -58,6 +58,28 @@ A field one release adds to an object another release also defines is declared i
 `BRANCH_ONLY_FIELDS` table, so a typo stays distinguishable from a deliberate cross-release
 addition.
 
+### `enum-coverage`
+
+```console
+$ cargo run -p xtask -- enum-coverage
+=== OCPI 2.3.0 enums ===
+35 enum(s) match the specification's value tables exactly
+…
+Every enum the specification defines has exactly the values it lists.
+```
+
+The same idea one level down. A field census compares *names* and says nothing about what may go
+in the field, and a missing enum value is the same defect hidden deeper:
+
+* on a **closed** enum, a conformant peer's object stops decoding — a whole page of Locations lost
+  over one plug type;
+* on an **open** enum it is quieter and worse. The value survives, in `Custom("MCS")`, so nothing
+  fails. It simply never matches `ConnectorType::Mcs` in any `match` you write, and your megawatt
+  chargers are invisible.
+
+Neither shows up in a fixture round-trip unless the specification happens to ship an example using
+that value, which for a 42-value enum it does not.
+
 ### `sync-fixtures`
 
 ```console
@@ -76,7 +98,7 @@ Every fixture needs a recorded expectation, and one with none fails the suite �
 
 ```console
 $ cargo run -p xtask -- no-floats
-63 file(s) scanned; no floats in the wire models or the pricing engine
+64 file(s) scanned; no floats in the wire models or the pricing engine
 ```
 
 Enforces the no-`f64` guarantee. It is a repository check rather than a clippy lint because
@@ -84,8 +106,23 @@ Enforces the no-`f64` guarantee. It is a repository check rather than a clippy l
 selectively. There is exactly one permitted exception, at the JSON number boundary, and the tool
 prints it with its justification on every run.
 
+### `dead-config`
+
+```console
+$ cargo run -p xtask -- dead-config
+24 configuration field(s) across 6 struct(s); every one is read somewhere
+```
+
+Fails the build when a public field of `Quirks`, `ClientConfig`, `RetryPolicy`, `ServerConfig`,
+`PricingPolicy` or `UrlPolicy` is only ever *assigned* and never read. A setting that does nothing
+is worse than a missing feature: somebody reads the doc comment, sets the flag, believes the
+problem is handled, and ships.
+
+It also refuses a field name **shared** by two of those structs: it matches a read by name and has
+no type information, so a shared name would make it blind to a dead field on either.
+
 ## In CI
 
-`no-floats` runs on every push. `spec-coverage` runs whenever a spec checkout is present.
-`sync-fixtures` is a maintenance task — the fixtures it produces are committed, so
-`tests/fixtures.rs` runs everywhere.
+`no-floats` and `dead-config` run on every push. `spec-coverage` and `enum-coverage` run whenever a
+spec checkout is present. `sync-fixtures` is a maintenance task — the fixtures it produces are
+committed, so `tests/fixtures.rs` runs everywhere.

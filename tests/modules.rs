@@ -96,10 +96,7 @@ fn sample_confirmation(id: &str) -> FinancialAdviceConfirmation {
 }
 
 fn accepted() -> ChargingProfileResponse {
-    ChargingProfileResponse::builder()
-        .result(ChargingProfileResponseType::Accepted)
-        .timeout(30u32)
-        .build()
+    ChargingProfileResponse::builder().result(ChargingProfileResponseType::Accepted).timeout(30u32).build()
 }
 
 fn sample_profile() -> ActiveChargingProfile {
@@ -539,7 +536,10 @@ async fn a_command_result_reaches_the_sender_at_the_url_it_published() {
         .expect("an OCPI envelope");
     assert_eq!(envelope["status_code"], StatusCode::SUCCESS.get());
     assert!(envelope.get("data").is_none(), "the spec leaves `data` unset here");
-    assert_eq!(server.party.journal.entries(), vec![format!("command result 1234 {:?}", CommandResultType::Accepted)]);
+    assert_eq!(
+        server.party.journal.entries(),
+        vec![format!("command result 1234 {:?}", CommandResultType::Accepted)]
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -753,4 +753,52 @@ async fn a_missing_interface_is_reported_before_a_request_is_made() {
         .await
         .expect_err("the peer does not implement Payments");
     assert!(matches!(error, OcpiError::NotFound(_)), "{error:?}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Router configuration
+// ---------------------------------------------------------------------------------------------
+
+/// Both interfaces of an ambiguously-shaped module on one router, with no prefix to separate
+/// them, is refused at start-up — in **either** mount order.
+///
+/// The Charging Profiles Sender and Receiver interfaces are both keyed by `{session_id}`, and
+/// Payments' by `terminals/{terminal_id}`. No route ordering can tell those apart, so the
+/// alternative to this panic is a router that silently misroutes in production.
+#[test]
+fn mounting_both_interfaces_with_no_prefix_is_refused_in_either_order() {
+    use ocpi_kit::server::ServerConfig;
+
+    fn router() -> OcpiRouter {
+        OcpiRouter::new(
+            VersionNumber::V2_3_0,
+            Url::new("https://e.com/ocpi/2.3.0").expect("valid URL"),
+            Arc::new(InMemoryTokenStore::new()),
+        )
+        .with_config(ServerConfig::default().one_router_per_role())
+    }
+
+    let receiver_first = std::panic::catch_unwind(|| {
+        router().charging_profiles_receiver(Party::new()).charging_profiles_sender(Party::new())
+    });
+    assert!(receiver_first.is_err(), "receiver then sender");
+
+    let sender_first =
+        std::panic::catch_unwind(|| router().payments_sender(Party::new()).payments_receiver(Party::new()));
+    assert!(sender_first.is_err(), "sender then receiver");
+
+    // With the default prefix, the Receiver interfaces sit one segment deeper and both fit.
+    let both = std::panic::catch_unwind(|| {
+        OcpiRouter::new(
+            VersionNumber::V2_3_0,
+            Url::new("https://e.com/ocpi/2.3.0").expect("valid URL"),
+            Arc::new(InMemoryTokenStore::new()),
+        )
+        .charging_profiles_receiver(Party::new())
+        .charging_profiles_sender(Party::new())
+        .payments_sender(Party::new())
+        .payments_receiver(Party::new())
+        .build()
+    });
+    assert!(both.is_ok(), "the default receiver_path_prefix separates them");
 }

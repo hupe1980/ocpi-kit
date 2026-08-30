@@ -30,8 +30,6 @@ pub struct ServerConfig {
     /// The interoperability profile for incoming requests, chiefly whether an unencoded
     /// `Authorization` token is accepted.
     pub quirks: Quirks,
-    /// Whether objects are validated before being returned. Defaults to `true`.
-    pub validate_outgoing: bool,
     /// The largest page a list endpoint will return, which is what `X-Limit` advertises.
     ///
     /// > *`X-Limit`: The maximum number of objects that the server can return.*
@@ -57,11 +55,14 @@ pub struct ServerConfig {
     /// between them:
     ///
     /// * `Some("receiver")` (the default) — one router, one `/versions`, and the Receiver
-    ///   interfaces published one segment deeper. The generated version details say so, which is
-    ///   the whole point of generating them.
+    ///   interfaces published one segment deeper. The generated version details say so.
     /// * `None` — the conventional split, with one [`OcpiRouter`] per role nested under its own
-    ///   base URL. Mounting both interfaces of the Locations module on one router with no prefix
-    ///   is a configuration error and panics at start-up with an explanation.
+    ///   base URL; set it with [`one_router_per_role`](Self::one_router_per_role). Mounting both
+    ///   interfaces of an ambiguously-shaped module on one router with no prefix is a
+    ///   configuration error and panics at start-up with an explanation.
+    ///
+    /// Charging Profiles (`{session_id}` on both sides) and Payments
+    /// (`terminals/{terminal_id}` on both sides) have the same problem as Locations.
     ///
     /// Spec: 2.3.0 §transport_and_format_interface_endpoints
     pub receiver_path_prefix: Option<String>,
@@ -71,10 +72,48 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             quirks: Quirks::default(),
-            validate_outgoing: true,
             max_page_limit: 100,
             receiver_path_prefix: Some("receiver".to_owned()),
         }
+    }
+}
+
+impl ServerConfig {
+    /// Sets the interoperability profile for incoming requests.
+    #[must_use]
+    pub fn with_quirks(mut self, quirks: Quirks) -> Self {
+        self.quirks = quirks;
+        self
+    }
+
+    /// Sets the largest page a list endpoint will return, which is what `X-Limit` advertises and
+    /// what the [`Page`](super::Page) extractor clamps an incoming `limit` to.
+    #[must_use]
+    pub const fn with_max_page_limit(mut self, limit: u64) -> Self {
+        self.max_page_limit = limit;
+        self
+    }
+
+    /// Publishes the Receiver interfaces under `prefix` instead of the default `receiver`.
+    #[must_use]
+    pub fn with_receiver_path_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.receiver_path_prefix = Some(prefix.into());
+        self
+    }
+
+    /// Publishes the Receiver interfaces at their bare paths, for a deployment that runs **one
+    /// router per role**.
+    ///
+    /// This is the conventional OCPI split — `/ocpi/cpo/2.3.0/locations` and
+    /// `/ocpi/emsp/2.3.0/locations` are different endpoints with independently chosen URLs — and
+    /// it is the right choice when each role has its own base URL. It is *not* a choice a
+    /// platform serving both roles from one router can make: see
+    /// [`receiver_path_prefix`](Self::receiver_path_prefix) for why, and expect a panic at
+    /// start-up if you try.
+    #[must_use]
+    pub fn one_router_per_role(mut self) -> Self {
+        self.receiver_path_prefix = None;
+        self
     }
 }
 
@@ -106,6 +145,12 @@ impl OcpiState {
         &self.mounted
     }
 
+    /// The OCPI version this router publishes.
+    #[must_use]
+    pub const fn version(&self) -> &VersionNumber {
+        &self.version
+    }
+
     /// The version details this server advertises, generated from what was mounted.
     #[must_use]
     pub fn version_details(&self) -> crate::v2_3_0::versions::VersionDetails {
@@ -133,6 +178,12 @@ impl AuthState for Arc<OcpiState> {
     }
     fn quirks(&self) -> &Quirks {
         &self.config.quirks
+    }
+}
+
+impl super::extract::PagePolicy for Arc<OcpiState> {
+    fn max_page_limit(&self) -> u64 {
+        self.config.max_page_limit
     }
 }
 
@@ -186,24 +237,29 @@ impl OcpiRouter {
     ///
     /// # Panics
     ///
-    /// Panics when both interfaces of the Locations module are mounted on one router with no
-    /// [`ServerConfig::receiver_path_prefix`]; their URLs would be indistinguishable. Better a
-    /// clear message at start-up than an opaque routing conflict.
-    fn check_receiver_conflict(&self, module: &ModuleId) {
+    /// Panics when both interfaces of a module whose two interfaces have the same URL shape are
+    /// mounted on one router with no [`ServerConfig::receiver_path_prefix`]. Better a clear
+    /// message at start-up than the routing conflict `axum` would raise a moment later.
+    ///
+    /// Checked in **both** mount orders, because the conflict does not care which came first.
+    fn check_interface_conflict(&self, module: &ModuleId, mounting: InterfaceRole) {
+        // Locations:        `{loc}/{evse}/{conn}`   vs `{cc}/{party}/{loc}`
+        // ChargingProfiles: `{session_id}`          vs `{session_id}`
+        // Payments:         `terminals/{id}`        vs `terminals/{id}`
         let ambiguous =
             matches!(module, ModuleId::Locations | ModuleId::ChargingProfiles | ModuleId::Payments);
-        if ambiguous
-            && self.config.receiver_path_prefix.is_none()
-            && self.mounted.contains(module, InterfaceRole::Sender)
-        {
-            panic!(
-                "cannot mount both interfaces of the {module} module on one router with no \
+        let other =
+            if mounting == InterfaceRole::Sender { InterfaceRole::Receiver } else { InterfaceRole::Sender };
+        assert!(
+            !(ambiguous
+                && self.config.receiver_path_prefix.is_none()
+                && self.mounted.contains(module, other)),
+            "cannot mount both interfaces of the {module} module on one router with no \
                  receiver path prefix: the Sender and Receiver URLs have the same shape, so no \
                  route ordering can tell them apart. Either set \
                  ServerConfig::receiver_path_prefix, or build one OcpiRouter per interface role \
-                 and nest them under different base URLs."
-            );
-        }
+                 and nest them under different base URLs.",
+        );
     }
 
     /// Starts a router for one OCPI version, published under `base_url`.
@@ -290,6 +346,7 @@ impl OcpiRouter {
     /// Mounts the Locations Sender interface: `GET` on locations, EVSEs and connectors.
     #[must_use]
     pub fn locations_sender<H: LocationsSender>(mut self, handler: H) -> Self {
+        self.check_interface_conflict(&ModuleId::Locations, InterfaceRole::Sender);
         let handler = Arc::new(handler);
         self.mounted.add(ModuleId::Locations, InterfaceRole::Sender);
 
@@ -390,7 +447,7 @@ impl OcpiRouter {
     #[must_use]
     pub fn locations_receiver<H: LocationsReceiver>(mut self, handler: H) -> Self {
         let prefix = self.receiver_prefix();
-        self.check_receiver_conflict(&ModuleId::Locations);
+        self.check_interface_conflict(&ModuleId::Locations, InterfaceRole::Receiver);
         let handler = Arc::new(handler);
         self.mounted.add(ModuleId::Locations, InterfaceRole::Receiver);
 
@@ -1126,7 +1183,7 @@ impl OcpiRouter {
     /// Mounts the Charging Profiles Receiver interface: `GET`/`PUT`/`DELETE` on a session.
     #[must_use]
     pub fn charging_profiles_receiver<H: ChargingProfilesReceiver>(mut self, handler: H) -> Self {
-        self.check_receiver_conflict(&ModuleId::ChargingProfiles);
+        self.check_interface_conflict(&ModuleId::ChargingProfiles, InterfaceRole::Receiver);
         let prefix = self.receiver_prefix();
         let handler = Arc::new(handler);
         self.mounted.add(ModuleId::ChargingProfiles, InterfaceRole::Receiver);
@@ -1205,6 +1262,7 @@ impl OcpiRouter {
     /// [`CallbackUrls`] for building the `response_url`s that reach them.
     #[must_use]
     pub fn charging_profiles_sender<H: ChargingProfilesSender>(mut self, handler: H) -> Self {
+        self.check_interface_conflict(&ModuleId::ChargingProfiles, InterfaceRole::Sender);
         let handler = Arc::new(handler);
         self.mounted.add(ModuleId::ChargingProfiles, InterfaceRole::Sender);
         let active = Arc::clone(&handler);
@@ -1303,6 +1361,7 @@ impl OcpiRouter {
     /// Mounts the Payments Sender interface: the terminals and financial advice this PTP owns.
     #[must_use]
     pub fn payments_sender<H: PaymentsSender>(mut self, handler: H) -> Self {
+        self.check_interface_conflict(&ModuleId::Payments, InterfaceRole::Sender);
         let handler = Arc::new(handler);
         self.mounted.add(ModuleId::Payments, InterfaceRole::Sender);
         let list = Arc::clone(&handler);
@@ -1472,7 +1531,7 @@ impl OcpiRouter {
     /// with `POST` and their URLs carry no owning party.
     #[must_use]
     pub fn payments_receiver<H: PaymentsReceiver>(mut self, handler: H) -> Self {
-        self.check_receiver_conflict(&ModuleId::Payments);
+        self.check_interface_conflict(&ModuleId::Payments, InterfaceRole::Receiver);
         let prefix = self.receiver_prefix();
         let handler = Arc::new(handler);
         self.mounted.add(ModuleId::Payments, InterfaceRole::Receiver);
@@ -1564,7 +1623,25 @@ impl OcpiRouter {
     ///
     /// The `/versions` and version-details endpoints are added automatically and describe exactly
     /// what was mounted.
+    /// # Panics
+    ///
+    /// Panics when the router publishes a version this build cannot translate the canonical model
+    /// into — today, anything other than 2.3.0 or 2.2.1. Handlers are written against
+    /// [`v2_3_0`](crate::v2_3_0), so a router that advertised OCPI 2.1.1 would answer a partner
+    /// with objects in a shape that version does not have; better a message at start-up than an
+    /// invoice built from it.
     pub fn build(self) -> Router {
+        assert!(
+            crate::convert::wire::bridgeable(&crate::CANONICAL_VERSION, &self.version),
+            "this build cannot serve OCPI {}: the handler traits speak the canonical {} model and \
+             there are no conversions between the two, so every response would be in a shape {} \
+             does not define. Mount a version this build can translate, or serve the canonical \
+             one.",
+            self.version,
+            crate::CANONICAL_VERSION,
+            self.version,
+        );
+        let bridging = self.version != crate::CANONICAL_VERSION;
         let state = Arc::new(OcpiState {
             tokens: self.tokens,
             config: self.config,
@@ -1575,7 +1652,8 @@ impl OcpiRouter {
         let details_state = Arc::clone(&state);
         let versions_state = Arc::clone(&state);
 
-        self.router
+        let mut router = self
+            .router
             .route(
                 "/",
                 get(async move |auth: Auth, ids: Ids| -> Result<_, OcpiErrorResponse> {
@@ -1596,7 +1674,12 @@ impl OcpiRouter {
                     Ok(OcpiReply::ok(versions).with_ids(ids))
                 }),
             )
-            .with_state(state)
+            .with_state(Arc::clone(&state));
+        // Only when it has work to do: on a canonical router nothing is buffered or re-encoded.
+        if bridging {
+            router = router.layer(axum::middleware::from_fn_with_state(state, super::bridge::translate));
+        }
+        router
     }
 }
 
@@ -1626,13 +1709,10 @@ struct ActiveProfileQuery {
 /// and wrapped, rather than going through the [`OcpiPatch`] extractor and picking up the rule
 /// that a `PATCH` must carry `last_updated`.
 fn partial_object<T>(body: &[u8]) -> Result<crate::transport::Patch<T>, OcpiError> {
-    let value: serde_json::Value = serde_json::from_slice(body)
-        .map_err(|e| OcpiError::MalformedJson(e.to_string()))?;
+    let value: serde_json::Value =
+        serde_json::from_slice(body).map_err(|e| OcpiError::MalformedJson(e.to_string()))?;
     if !value.is_object() {
-        return Err(OcpiError::Decode {
-            path: "/".to_owned(),
-            message: "expected a JSON object".to_owned(),
-        });
+        return Err(OcpiError::Decode { path: "/".to_owned(), message: "expected a JSON object".to_owned() });
     }
     Ok(crate::transport::Patch::from_value(value))
 }
@@ -1742,7 +1822,7 @@ fn status_of(created: super::traits::Created) -> http::StatusCode {
     http::StatusCode::from_u16(created.http_status()).unwrap_or(http::StatusCode::OK)
 }
 
-fn page_reply<T>(page: Page<T>, state: &Arc<OcpiState>) -> OcpiReply<Vec<T>> {
+fn page_reply<T: crate::types::Validate>(page: Page<T>, state: &Arc<OcpiState>) -> OcpiReply<Vec<T>> {
     let mut headers = http::HeaderMap::new();
     let meta = PageMeta { limit: Some(state.config.max_page_limit), ..page.meta };
     meta.write_to(&mut headers);
@@ -1814,5 +1894,62 @@ mod tests {
         // A body that is not the command it claims to be reports where it went wrong.
         let err = parse_command("STOP_SESSION", b"{}").unwrap_err();
         assert_eq!(err.status_code(), crate::transport::StatusCode::INVALID_PARAMETERS);
+    }
+
+    fn router(config: ServerConfig) -> OcpiRouter {
+        OcpiRouter::new(
+            VersionNumber::V2_3_0,
+            Url::new("https://cpo.example.com/ocpi/cpo/2.3.0").expect("a valid URL"),
+            Arc::new(super::super::InMemoryTokenStore::new()),
+        )
+        .with_config(config)
+    }
+
+    /// The ambiguity does not care which interface was mounted first, so neither may the check.
+    ///
+    /// It fired from the Receiver mounts only, so mounting Receiver-then-Sender fell through to
+    /// whatever `axum` says about a route conflict — a different message, at a different moment,
+    /// about a different thing.
+    #[test]
+    fn an_ambiguous_pair_is_refused_in_both_mount_orders() {
+        for module in [ModuleId::Locations, ModuleId::ChargingProfiles, ModuleId::Payments] {
+            for (first, second) in [
+                (InterfaceRole::Sender, InterfaceRole::Receiver),
+                (InterfaceRole::Receiver, InterfaceRole::Sender),
+            ] {
+                let mut r = router(ServerConfig::default().one_router_per_role());
+                r.mounted.add(module.clone(), first);
+                let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    r.check_interface_conflict(&module, second);
+                }));
+                assert!(refused.is_err(), "{module} mounted {first} then {second} must be refused");
+            }
+        }
+    }
+
+    #[test]
+    fn a_receiver_path_prefix_is_what_makes_the_pair_servable() {
+        let mut r = router(ServerConfig::default());
+        r.mounted.add(ModuleId::Locations, InterfaceRole::Sender);
+        // The default prefix publishes the Receiver one segment deeper, so there is no ambiguity.
+        r.check_interface_conflict(&ModuleId::Locations, InterfaceRole::Receiver);
+
+        // And a module whose two interfaces have different URL shapes never had the problem.
+        let mut r = router(ServerConfig::default().one_router_per_role());
+        r.mounted.add(ModuleId::Tokens, InterfaceRole::Sender);
+        r.check_interface_conflict(&ModuleId::Tokens, InterfaceRole::Receiver);
+    }
+
+    #[test]
+    fn every_documented_alternative_is_reachable_from_outside_the_crate() {
+        // `ServerConfig` is `#[non_exhaustive]`, so a struct literal is not an option for a user;
+        // the builders are the whole API and each one must exist.
+        let config = ServerConfig::default()
+            .with_quirks(Quirks::default())
+            .with_max_page_limit(25)
+            .with_receiver_path_prefix("emsp");
+        assert_eq!(config.max_page_limit, 25);
+        assert_eq!(config.receiver_path_prefix.as_deref(), Some("emsp"));
+        assert_eq!(ServerConfig::default().one_router_per_role().receiver_path_prefix, None);
     }
 }

@@ -1,0 +1,15 @@
+---
+source: tests/snapshots.rs
+expression: "rendered.join(\"\\n\")"
+---
+HTTP 400 | 2001 (Invalid or missing parameters) | malformed JSON: expected value at line 1 column 1
+HTTP 200 | 2001 (Invalid or missing parameters) | cannot decode /evses/0/connectors/0/standard: unknown variant `IEC_62196_T2_X`
+HTTP 401 | 2000 (Generic client error) | unauthorized: no Authorization header
+HTTP 401 | 2000 (Generic client error) | CREDENTIALS_TOKEN_A may only be used on the credentials and versions modules
+HTTP 404 | 2000 (Generic client error) | not found: /ocpi/cpo/2.3.0/locations/LOC99
+HTTP 405 | 2000 (Generic client error) | method not allowed: this client is already registered
+HTTP 200 | 2001 (Invalid or missing parameters) | cannot route this request: a GET addressed to the hub is not a Broadcast Push
+HTTP 200 | 3000 (Generic server error) | transport error: connection closed before message completed
+HTTP 200 | 3000 (Generic server error) | refused to call http://169.254.169.254/latest/meta-data: 169.254.169.254 is on a private or loopback network
+HTTP 200 | 2004 (Unknown Token) | peer returned OCPI status 2004 (Unknown Token): no such Token
+HTTP 200 | 1000 (Generic success code) | peer returned OCPI status 1000 (Generic success code) but no data

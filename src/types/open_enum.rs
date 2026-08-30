@@ -405,9 +405,6 @@ macro_rules! __ocpi_open_enum_impl {
     };
 }
 
-/// Shared validation for the `Custom` payload of every [`ocpi_open_enum!`] type.
-///
-/// Not part of the public contract; called by the generated code.
 /// Shared validation for the `Custom` payload of an [`ocpi_lenient_enum!`] type: the value is
 /// kept, but reported, because the specification version in question declares the enum closed.
 ///
@@ -426,6 +423,13 @@ pub fn validate_closed_enum_value(enum_name: &'static str, value: &str, v: &mut 
     );
 }
 
+/// Shared validation for the `Custom` payload of every [`ocpi_open_enum!`] type.
+///
+/// An unrecognised value is a legitimate extension, so the value itself is never reported. What
+/// is reported is a value that could not have come off a conformant wire at all: an empty string,
+/// or one carrying a control character.
+///
+/// Not part of the public contract; called by the generated code.
 #[doc(hidden)]
 pub fn validate_open_enum_value(enum_name: &'static str, value: &str, v: &mut super::validate::Validator) {
     use super::validate::ViolationCode;

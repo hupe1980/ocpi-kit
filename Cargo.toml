@@ -17,7 +17,7 @@ documentation = "https://docs.rs/ocpi-kit"
 readme = "README.md"
 keywords = ["ocpi", "ev", "charging", "roaming", "emobility"]
 categories = ["network-programming", "web-programming", "api-bindings"]
-exclude = ["/specs", "/CONCEPT.md", "/.github", "/site", "/xtask"]
+exclude = ["/specs", "/.github", "/site", "/xtask"]
 
 [lib]
 name = "ocpi_kit"
@@ -100,8 +100,15 @@ invoice-reconciliation = ["v2_3_0"]
 ## Envelope, headers, credentials tokens, pagination, routing, URL builders, PATCH.
 transport = ["dep:base64", "dep:http", "dep:subtle", "dep:uuid", "dep:zeroize"]
 ## Async OCPI client on top of `reqwest`.
+##
+## The layers above `transport` all speak the 2.3.0 model — it is the canonical one, and the
+## other versions are defined as deltas from it — so they enable `v2_3_0` rather than failing to
+## compile without it. They also enable `convert`, because a peer on an older version is normal
+## rather than exceptional: bridging it onto the canonical model is how they stay usable.
 client = [
     "transport",
+    "v2_3_0",
+    "convert",
     "dep:futures-core",
     "dep:futures-util",
     "dep:reqwest",
@@ -110,15 +117,28 @@ client = [
     "dep:tracing",
 ]
 ## Async OCPI server on top of `axum`.
-server = ["transport", "dep:axum", "dep:tower", "dep:tokio", "dep:tracing", "dep:serde_path_to_error"]
+server = [
+    "transport",
+    "v2_3_0",
+    "convert",
+    "dep:axum",
+    "dep:tower",
+    "dep:tokio",
+    "dep:tracing",
+    "dep:serde_path_to_error",
+]
 ## Hub: routing table, forwarder, broadcast push, GET-All merge, version bridging.
 hub = ["client", "server"]
 ## Conversions between OCPI versions with loss accounting.
-convert = []
+##
+## It converts *between* two models, so it declares both: a feature that only compiles when some
+## other feature happens to be on is not a feature.
+convert = ["v2_2_1", "v2_3_0"]
 ## Auditable tariff/pricing engine.
-tariffs = ["dep:tzdb", "dep:tz-rs"]
-## Fixtures, in-memory stores and a mock peer for tests.
-testkit = ["transport", "dep:rand"]
+tariffs = ["v2_3_0", "dep:tzdb", "dep:tz-rs"]
+## Sample objects and in-memory stores for tests; with `server`, a complete conformant OCPI
+## party (`MockPeer`) to point a partner's client at.
+testkit = ["transport", "v2_3_0", "dep:rand"]
 ## `JsonSchema` derives for every wire type.
 schema = ["dep:schemars"]
 ## The `ocpi` command line tool.
@@ -161,16 +181,32 @@ name = "modules"
 required-features = ["client", "server", "testkit"]
 
 [[test]]
+name = "hub"
+required-features = ["hub", "testkit"]
+
+[[test]]
 name = "version_bridging"
-required-features = ["convert", "v2_2_1"]
+required-features = ["convert", "v2_2_1", "tariffs"]
+
+[[test]]
+name = "versions_on_the_wire"
+required-features = ["client", "server", "hub", "testkit"]
+
+[[test]]
+name = "snapshots"
+required-features = ["tariffs", "transport", "v2_3_0"]
 
 [[test]]
 name = "properties"
-required-features = ["transport"]
+required-features = ["transport", "tariffs", "v2_3_0"]
 
 [[test]]
 name = "mock_peer"
 required-features = ["client", "testkit"]
+
+[[test]]
+name = "mock_peer_server"
+required-features = ["client", "server", "testkit"]
 
 [[bench]]
 name = "wire"

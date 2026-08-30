@@ -45,13 +45,98 @@ See [Numbers and money](@/docs/concepts/numbers.md).
 and OCPI 3.0 removes `step_size` altogether. Both are settings on `PricingPolicy` rather than
 assumptions baked into the code.
 
+**And the breakdown survives being written down.** A duration in hours is a repeating decimal —
+eight minutes is 0.1333… — so a report that carried its measurements verbatim would hold values a
+JSON number cannot, which this crate's own validator flags as imprecise. `quantity_decimals`
+(default 6, enough for a second and a tenth of a watt hour) decides what the breakdown *says* was
+measured; money is computed from the exact quantity and rounded separately by `component_decimals`.
+Rounding the report and rounding the charge are different decisions, so they are different
+settings. A test asserts that a whole breakdown round-trips: an audit artefact that does not
+survive being stored is not an audit artefact.
+
+**And it audits the CDR it is pricing.** See below.
+
+## When the CDR is the problem
+
+A Charging Period carries totals, not a curve. There is no way to know how much of its energy fell
+before a tariff switched and how much after — so the specification puts the obligation on the CPO:
+
+> *A CPO SHALL at least start (and add) a ChargingPeriod every moment/event that has relevance for
+> the total costs of a CDR. … When an energy changes in price after 17:00. The CPO has to start a
+> new Charging Period at 17:00.*
+
+Every implementation assumes that holds and prices each period at the rate that applied when it
+began. `ocpi-tariffs` documents the assumption plainly: *"No attempt will be made to subdivide or
+interpolate data inside a single provided period."* The assumption is right — there is nothing
+better to do with the data. The silence is the problem.
+
+This engine re-evaluates the restrictions at the moment each period **ends**. If a different Price
+Component would apply by then, the period outlasted its price, and the breakdown says so:
+
+```text
+[period_spans_price_change] the ENERGY Charging Period starting here outlasts the Price Component
+that prices it: element 1 applies at the start and element 0 by the time the period ends. A CPO
+SHALL start a new Charging Period at a price change, so this one should have been split; its
+ENERGY is billed in full at the earlier rate, because nothing in the period says how it divides
+```
+
+The total beside it is unchanged — nothing is guessed or interpolated. What changed is that a
+defect which produces a *plausible* number is now a line somebody can act on. A CDR can total
+correctly by luck and still be malformed, which is why `ocpi price` exits non-zero on a note as
+well as on a mismatch.
+
+Two other things are checked the same way: Charging Periods that are not in chronological order
+(`step_size` is defined in terms of *"the last relevant PriceComponent"*, so out of order it is
+quietly wrong), and dimensions the tariff prices nothing for.
+
+Notes carry a **machine-readable code**, not just a sentence, because a reconciliation pipeline
+has to be able to count how many of this month's CDRs span a price change:
+
+```rust
+let breakdown = PricingEngine::new().price(&session, &tariffs)?;
+if breakdown.needs_review() {
+    for note in breakdown.notes_with(PricingNoteCode::PeriodSpansPriceChange) {
+        tracing::warn!(at = %note.at.unwrap(), "{}", note.message);
+    }
+}
+```
+
+## The breakdown adds up
+
+The tax lines of a breakdown always sum to exactly `total_incl_vat - total_excl_vat`. That sounds
+free and is not — three things break it, and none is visible in an assertion on a total:
+
+* **Precision.** Lines accumulated at `component_decimals` (four places) beside totals rounded to
+  `currency_decimals` (two) leave a 2% VAT printing as `500.4720` next to totals differing by
+  `500.47`. Half a cent, and an audit finding. Lines are rounded to currency precision, and the
+  last one absorbs the residue so they sum to the difference exactly.
+* **A price limit.** A `min_price` clamp raises the pre-tax total; leaving the tax lines describing
+  what was metered makes a €0.50 session under a €5.00 minimum come out as €5.00 net with **€0.00
+  VAT** and a line still claiming €0.105. The clamp moves the lines with the base, in proportion.
+* **A malformed tariff.** A negative `vat` percentage describes a session that costs less with tax
+  than without. The inclusive total is held at the exclusive one and a `NegativeTax` note names the
+  cause, rather than publishing a bill nobody can use.
+
+A property test asserts the invariant over generated tariffs and sessions, and the generator
+produces **malformed** tariffs deliberately: one that only produces well-formed input proves the
+engine works on well-formed input, which is not the interesting half.
+
+Where a `min_price.after_taxes` demands tax that no rate in the session accounts for, the line is
+emitted with `percentage: None` — the amount is a fact, the rate is not knowable, and inventing one
+would be a lie in a document somebody files.
+
 ## `step_size`, precisely
 
 This is the rule most implementations get wrong, and the spec states it carefully:
 
 * an `ENERGY` `step_size` is applied **once per session**, to the total, not per period
-* `TIME` and `PARKING_TIME` `step_size` is applied **once, to the two combined**, on the last
-  time-based dimension of the session
+* `TIME` and `PARKING_TIME` `step_size` is applied **once, to the two combined**, and
+  `PARKING_TIME` is what absorbs it whenever the session has any — *"In the cases that `TIME` and
+  `PARKING_TIME` Tariff Elements are both used, `step_size` is only taken into account for the
+  total parking duration"*. The specification's own worked example reaches the same answer by a
+  different route (*"the charging duration is not rounded up, as it is followed by another time
+  based period"*); the two readings agree on every session that charges and then parks, and this
+  engine follows the sentence
 * a `step_size` of `0` means no quantisation — the specification's own free-of-charge example uses
   it — while a `step_size` of `1` is meaningful and is applied
 
@@ -68,6 +153,22 @@ resolves it with a bundled `tzdb`, so there is no dependency on the host's zonei
 Also evaluated: kWh, current, power and duration windows, `reservation`, and element switching
 mid-period.
 
+Two of those need a decision the specification does not make.
+
+**`start_time == end_time` is the whole day.** The spec is silent, and the two readings are far
+apart: as an empty interval the element never matches, through the wrap-around rule it always
+does. This crate takes the whole day, because it is what the wrap rule produces with no special
+case *and* because it fails safe. An element that never matches leaves its dimension with no Price
+Component, and the specification's answer to that is that the dimension is free — so the other
+reading silently gives the energy away.
+
+**Reserved time is priced separately from charging time.** A `ChargingPeriod` can carry `TIME` and
+`RESERVATION_TIME` at once, and the two are priced by different Tariff Elements — one restricted
+with `reservation`, one not. Summing them and looking the total up once would bill the charging
+minutes at the reservation rate, usually the dearer of the two. Each is looked up in the context
+that describes it, and both appear as their own segment in the breakdown. They still share the
+`TIME` dimension, and so the one `step_size` budget the specification allows.
+
 ## Multiple tariffs
 
 A Connector can list several `tariff_ids` in preference order, each with its own validity window.
@@ -77,9 +178,13 @@ through the list the way the specification describes. `min_price` and `max_price
 
 ## Conformance
 
-Twelve of the specification's own worked tariff examples are tests in this repository, and they
+Ten of the specification's own worked tariff examples are tests in this repository, and they
 pass — including the free-of-charge case, the ad-hoc payment cases, and the ones with combined
 time and parking `step_size`.
+
+Two more are [snapshots](@/docs/reference/verification.md): the `step_size` example rendered in
+full, next to the same session priced under the OCPI 3.0 policy that has no `step_size` at all.
+Side by side, that pair is the clearest statement of what block billing costs a driver.
 
 ## Checking a CDR against itself
 

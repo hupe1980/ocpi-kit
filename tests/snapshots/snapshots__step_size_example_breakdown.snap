@@ -1,0 +1,61 @@
+---
+source: tests/snapshots.rs
+expression: breakdown
+---
+{
+  "dimensions": [
+    {
+      "dimension": "TIME",
+      "measured": 0.2,
+      "billed": 0.2,
+      "cost": 0.48,
+      "vat": 0.096,
+      "segments": [
+        {
+          "start": "2024-01-15T19:40:00Z",
+          "quantity": 0.2,
+          "price": 2.4,
+          "vat_percentage": 20,
+          "cost": 0.48,
+          "applied": {
+            "tariff_id": "14",
+            "element_index": 0,
+            "component_index": 0,
+            "because": "at 2024-01-15 19:40 local (MONDAY), 0 kWh and 0s into the session"
+          }
+        }
+      ]
+    },
+    {
+      "dimension": "PARKING_TIME",
+      "measured": 0.133333,
+      "billed": 0.25,
+      "cost": 0.25,
+      "vat": 0.05,
+      "segments": [
+        {
+          "start": "2024-01-15T19:52:00Z",
+          "quantity": 0.25,
+          "price": 1,
+          "vat_percentage": 20,
+          "cost": 0.25,
+          "applied": {
+            "tariff_id": "14",
+            "element_index": 2,
+            "component_index": 0,
+            "because": "at 2024-01-15 19:52 local (MONDAY), 0 kWh and 720s into the session"
+          }
+        }
+      ]
+    }
+  ],
+  "total_excl_vat": 0.73,
+  "total_incl_vat": 0.88,
+  "taxes": [
+    {
+      "percentage": 20,
+      "taxable": 0.73,
+      "amount": 0.15
+    }
+  ]
+}
