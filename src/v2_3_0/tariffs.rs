@@ -568,12 +568,15 @@ ocpi_enum! {
     }
 }
 
+// `#[cfg]` gates the whole expansion, so it stays out here; the `doc(cfg)` badge has to go *in*,
+// on the enum the macro emits. Attached to the invocation instead it documents nothing, and
+// rustdoc rejects it: "rustdoc does not generate documentation for macro invocations".
 #[cfg(feature = "bookings")]
-#[cfg_attr(docsrs, doc(cfg(feature = "bookings")))]
 ocpi_enum! {
     /// What kind of booking cost a Tariff Element describes.
     ///
     /// Spec: 2.3.0-bookings §mod_tariffs_booking_restriction_type
+    #[cfg_attr(docsrs, doc(cfg(feature = "bookings")))]
     pub enum BookingRestrictionType {
         /// Costs for a booking.
         Booking = "BOOKING",

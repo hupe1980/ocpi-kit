@@ -87,6 +87,11 @@ impl std::error::Error for UnknownVariant {}
 /// assert_eq!(ConnectorFormat::Socket.as_str(), "SOCKET");
 /// assert!("SCREW".parse::<ConnectorFormat>().is_err());
 /// ```
+///
+/// Attributes that document the enum — `#[cfg_attr(docsrs, doc(cfg(…)))]` above all — go **inside**
+/// the invocation, on the `pub enum` line, so they land on the item this expands to. On the
+/// invocation itself they document nothing, and rustdoc refuses them. A `#[cfg]` is the exception:
+/// it belongs outside, where it gates the whole expansion rather than the enum alone.
 #[macro_export]
 macro_rules! ocpi_enum {
     (

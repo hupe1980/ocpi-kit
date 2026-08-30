@@ -198,6 +198,11 @@ cargo run -p xtask -- no-floats
 cargo run -p xtask -- spec-coverage --check
 cargo run -p xtask -- enum-coverage --check
 cargo run -p xtask -- dead-config
+
+# The docs are built the way docs.rs builds them: nightly, with `--cfg docsrs` so the
+# `doc(cfg(…))` feature badges are compiled in. Plain `cargo doc` on stable does not see
+# them, and so does not see the warnings they can produce.
+RUSTDOCFLAGS='-D warnings --cfg docsrs' cargo +nightly doc --no-deps --all-features
 ```
 
 ## What the guarantees cost
