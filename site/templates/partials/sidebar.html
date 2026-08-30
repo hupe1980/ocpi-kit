@@ -1,0 +1,24 @@
+{% set docs = get_section(path="docs/_index.md") %}
+<nav class="sidebar" aria-label="Documentation">
+  <button class="sidebar-toggle" type="button" aria-expanded="false" aria-controls="sidebar-list">
+    Documentation menu
+  </button>
+  <ul id="sidebar-list" class="sidebar-list">
+    <li class="sidebar-top{% if current_path == docs.path %} is-current{% endif %}">
+      <a href="{{ docs.permalink }}">Overview</a>
+    </li>
+    {% for sub in docs.subsections %}
+      {% set s = get_section(path=sub) %}
+      <li class="sidebar-group">
+        <h2>{{ s.title }}</h2>
+        <ul>
+          {% for p in s.pages %}
+            <li{% if current_path == p.path %} class="is-current"{% endif %}>
+              <a href="{{ p.permalink }}"{% if current_path == p.path %} aria-current="page"{% endif %}>{{ p.title }}</a>
+            </li>
+          {% endfor %}
+        </ul>
+      </li>
+    {% endfor %}
+  </ul>
+</nav>

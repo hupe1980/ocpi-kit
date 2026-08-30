@@ -1,0 +1,37 @@
+{
+  "data": [
+    {
+      "auth_id": "FA54320",
+      "issuer": "TheNewMotion",
+      "last_updated": "2015-06-21T22:39:05Z",
+      "type": "RFID",
+      "uid": "100012",
+      "valid": true,
+      "visual_number": "DF000-2001-8999",
+      "whitelist": "ALWAYS"
+    },
+    {
+      "auth_id": "FA543A5",
+      "issuer": "TheNewMotion",
+      "last_updated": "2015-06-28T11:21:09Z",
+      "type": "RFID",
+      "uid": "100013",
+      "valid": true,
+      "visual_number": "DF000-2001-9000",
+      "whitelist": "ALLOWED"
+    },
+    {
+      "auth_id": "FA543BB",
+      "issuer": "TheNewMotion",
+      "last_updated": "2015-05-29T10:12:26Z",
+      "type": "RFID",
+      "uid": "100014",
+      "valid": false,
+      "visual_number": "DF000-2001-9010",
+      "whitelist": "ALLOWED"
+    }
+  ],
+  "status_code": 1000,
+  "status_message": "Success",
+  "timestamp": "2015-06-30T21:59:59Z"
+}

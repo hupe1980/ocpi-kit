@@ -1,0 +1,45 @@
+name: Pages
+
+# Publishes the guide under site/ to GitHub Pages.
+
+on:
+  push:
+    branches: [main]
+    paths: ["site/**", ".github/workflows/pages.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: taiki-e/install-action@zola
+      - uses: actions/configure-pages@v5
+        id: pages
+      # `base_url` must match where Pages actually serves the site.
+      - run: zola --root site build --base-url "${{ steps.pages.outputs.base_url || 'https://hupe1980.github.io/ocpi-kit' }}"
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/public
+
+  deploy:
+    name: deploy
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

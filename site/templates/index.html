@@ -1,0 +1,147 @@
+{% extends "base.html" %}
+{% block body_class %}landing{% endblock %}
+
+{% block content %}
+<section class="hero">
+  <div class="hero-inner">
+    <p class="eyebrow">Rust · OCPI 2.3.0 · 2.2.1 · 2.1.1</p>
+    <h1>OCPI for Rust,<br>without the rounding errors</h1>
+    <p class="lede">
+      Spec-exact wire models for every OCPI version in production, plus the transport envelope,
+      an async client, an <code>axum</code> server, the pieces a roaming hub needs, and an
+      auditable tariff engine. One crate, behind cargo features.
+    </p>
+
+    <div class="cta">
+      <a class="btn btn-primary" href="{{ get_url(path='@/docs/getting-started/install.md') }}">Get started</a>
+      <a class="btn" href="{{ config.extra.api_docs }}" rel="noopener">API reference</a>
+      <a class="btn btn-ghost" href="{{ config.extra.repo }}" rel="noopener">GitHub</a>
+    </div>
+
+    <div class="install">
+      <code>cargo add ocpi-kit</code>
+      <button class="copy" type="button" data-copy="cargo add ocpi-kit" aria-label="Copy install command">Copy</button>
+    </div>
+  </div>
+</section>
+
+<section class="pillars" aria-labelledby="pillars-h">
+  <h2 id="pillars-h" class="section-title">Three properties that decide quality</h2>
+  <div class="grid-3">
+    <article class="card">
+      <h3>Money is never a float</h3>
+      <p>
+        Every <code>number</code> is an exact decimal. No public field of any OCPI object is an
+        <code>f32</code> or <code>f64</code>, the pricing engine has none either, and a repository
+        check enforces it in CI.
+      </p>
+      <p class="card-note">
+        A binary float cannot represent <code>0.10</code>. Every other Rust OCPI type set models
+        prices as <code>f64</code>; cents decide real disputes.
+      </p>
+      <a class="card-link" href="{{ get_url(path='@/docs/concepts/numbers.md') }}">Numbers and money →</a>
+    </article>
+
+    <article class="card">
+      <h3>Nothing a peer sent is thrown away</h3>
+      <p>
+        Undocumented JSON fields land in an <code>Extensions</code> map and are written back
+        verbatim. An enum value this crate has never heard of keeps its text.
+      </p>
+      <p class="card-note">
+        A hub built on <code>ocpi-kit</code> forwards a vendor extension it does not understand
+        without damaging it — which is what OCPI 2.3.0's extensibility chapter asks for.
+      </p>
+      <a class="card-link" href="{{ get_url(path='@/docs/concepts/extensions.md') }}">Extensions →</a>
+    </article>
+
+    <article class="card">
+      <h3>Parsing and conformance are separate</h3>
+      <p>
+        A peer that overruns a <code>string(45)</code> cannot make a whole page of Locations
+        undecodable. The value arrives; validation reports it with an RFC&nbsp;6901 JSON Pointer.
+      </p>
+      <p class="card-note">
+        Parse permissively, validate explicitly, construct strictly.
+      </p>
+      <a class="card-link" href="{{ get_url(path='@/docs/concepts/parse-validate-construct.md') }}">The rule →</a>
+    </article>
+  </div>
+</section>
+
+<section class="showcase" aria-labelledby="showcase-h">
+  <div class="showcase-inner">
+    <div class="showcase-text">
+      <h2 id="showcase-h">The handshake, as a typestate</h2>
+      <p>
+        Most OCPI integrations break in the credentials exchange, and every failure mode is a state
+        mistake: using <code>CREDENTIALS_TOKEN_A</code> after registering, POSTing credentials twice
+        and getting a 405, forgetting to re-fetch endpoints after a PUT.
+      </p>
+      <p>
+        So the states are types. You cannot call a module endpoint before discovery, and the
+        bootstrap token is gone once you have registered.
+      </p>
+      <a class="card-link" href="{{ get_url(path='@/docs/layers/client.md') }}">Client →</a>
+    </div>
+    <div class="showcase-code">
+      {{ load_data(path="snippets/client.md", format="plain") | markdown | safe }}
+    </div>
+  </div>
+</section>
+
+<section class="features" aria-labelledby="features-h">
+  <h2 id="features-h" class="section-title">What is in the box</h2>
+  <div class="grid-4">
+    <a class="tile" href="{{ get_url(path='@/docs/layers/transport.md') }}">
+      <h3>Transport</h3>
+      <p>Envelope, the status-code rules, headers, credentials tokens, pagination, routing, PATCH. No async runtime.</p>
+    </a>
+    <a class="tile" href="{{ get_url(path='@/docs/layers/client.md') }}">
+      <h3>Client</h3>
+      <p>Async over <code>reqwest</code>. SSRF-guarded URLs, outgoing validation, retries only where the spec allows.</p>
+    </a>
+    <a class="tile" href="{{ get_url(path='@/docs/layers/server.md') }}">
+      <h3>Server</h3>
+      <p>An <code>axum</code> router driven by one trait per module and interface. Discovery generated from what you mounted.</p>
+    </a>
+    <a class="tile" href="{{ get_url(path='@/docs/layers/hub.md') }}">
+      <h3>Hub</h3>
+      <p>Routing table, broadcast push, open routing, GET All, and version bridging with loss accounting.</p>
+    </a>
+    <a class="tile" href="{{ get_url(path='@/docs/layers/tariffs.md') }}">
+      <h3>Tariffs</h3>
+      <p>What a session cost and exactly why — per dimension, per element, with <code>step_size</code> shown.</p>
+    </a>
+    <a class="tile" href="{{ get_url(path='@/docs/layers/conformance.md') }}">
+      <h3>Conformance</h3>
+      <p>Drive a live peer through the specification's rules. Read-only, so it is safe against production.</p>
+    </a>
+    <a class="tile" href="{{ get_url(path='@/docs/concepts/versions.md') }}">
+      <h3>Versions</h3>
+      <p>2.3.0, 2.2.1 and 2.1.1, plus the bookings and payments branches. Convert between them, and see what it cost.</p>
+    </a>
+    <a class="tile" href="{{ get_url(path='@/docs/getting-started/cli.md') }}">
+      <h3>CLI</h3>
+      <p><code>validate</code>, <code>versions</code>, <code>pull</code>, <code>price</code>, <code>convert</code>, <code>conformance</code>, <code>schema</code>.</p>
+    </a>
+  </div>
+</section>
+
+<section class="numbers" aria-labelledby="numbers-h">
+  <h2 id="numbers-h" class="section-title">Checked against the specification, not against intent</h2>
+  <p class="section-lede">
+    Every public item names the AsciiDoc anchor it implements, and repository automation compares
+    the crate with the specification on every push.
+  </p>
+  <ul class="stats">
+    <li><strong>275</strong><span>object field-censuses across five releases</span></li>
+    <li><strong>218</strong><span>spec examples round-tripped byte-for-byte</span></li>
+    <li><strong>414</strong><span>tests across seven targets</span></li>
+    <li><strong>0</strong><span>floats in the wire models or the pricing engine</span></li>
+  </ul>
+  <p class="center">
+    <a class="btn" href="{{ get_url(path='@/docs/reference/verification.md') }}">How it is verified</a>
+  </p>
+</section>
+{% endblock %}

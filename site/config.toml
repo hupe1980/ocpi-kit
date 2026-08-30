@@ -1,0 +1,39 @@
+base_url = "https://hupe1980.github.io/ocpi-kit"
+title = "ocpi-kit"
+description = "A Rust toolkit for OCPI (Open Charge Point Interface): spec-exact wire models for OCPI 2.3.0, 2.2.1 and 2.1.1, transport, async client, axum server, roaming hub, and an auditable tariff engine."
+default_language = "en"
+
+compile_sass = true
+build_search_index = true
+generate_feeds = true
+feed_filenames = ["atom.xml"]
+
+taxonomies = []
+
+[markdown]
+smart_punctuation = false
+insert_anchor_links = "heading"
+external_links_target_blank = true
+external_links_no_referrer = true
+
+[markdown.highlighting]
+style = "inline"
+light_theme = "ayu-light"
+dark_theme = "ayu-dark"
+add_color_scheme = true
+
+[search]
+index_format = "elasticlunr_json"
+
+[link_checker]
+# Links into the repository resolve only once a change is pushed; the build must not depend on it.
+skip_prefixes = ["https://github.com/hupe1980/ocpi-kit/"]
+
+[extra]
+repo = "https://github.com/hupe1980/ocpi-kit"
+crate = "https://crates.io/crates/ocpi-kit"
+api_docs = "https://docs.rs/ocpi-kit"
+author = "hupe1980"
+# Shown in the tab bar of the hero code sample and in social cards.
+tagline = "OCPI for Rust, without the rounding errors"
+keywords = "OCPI, Open Charge Point Interface, Rust, EV roaming, EV charging, CPO, eMSP, roaming hub, OCPI 2.3.0, OCPI 2.2.1, OCPI 2.1.1, charge point, e-mobility, tariff engine"

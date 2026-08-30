@@ -1,0 +1,76 @@
+{
+  "address": "F.Rooseveltlaan 3A",
+  "city": "Gent",
+  "coordinates": {
+    "latitude": "51.047599",
+    "longitude": "3.729944"
+  },
+  "country": "BEL",
+  "evses": [
+    {
+      "capabilities": [
+        "RESERVABLE"
+      ],
+      "connectors": [
+        {
+          "amperage": 16,
+          "format": "CABLE",
+          "id": "1",
+          "last_updated": "2015-03-16T10:10:02Z",
+          "power_type": "AC_3_PHASE",
+          "standard": "IEC_62196_T2",
+          "tariff_id": "11",
+          "voltage": 220
+        },
+        {
+          "amperage": 16,
+          "format": "SOCKET",
+          "id": "2",
+          "last_updated": "2015-03-18T08:12:01Z",
+          "power_type": "AC_3_PHASE",
+          "standard": "IEC_62196_T2",
+          "tariff_id": "11",
+          "voltage": 220
+        }
+      ],
+      "evse_id": "BE-BEC-E041503001",
+      "floor_level": "-1",
+      "last_updated": "2015-06-28T08:12:01Z",
+      "physical_reference": "1",
+      "status": "AVAILABLE",
+      "status_schedule": [],
+      "uid": "3256"
+    },
+    {
+      "capabilities": [
+        "RESERVABLE"
+      ],
+      "connectors": [
+        {
+          "amperage": 16,
+          "format": "SOCKET",
+          "id": "1",
+          "last_updated": "2015-06-29T20:39:09Z",
+          "power_type": "AC_3_PHASE",
+          "standard": "IEC_62196_T2",
+          "tariff_id": "12",
+          "voltage": 220
+        }
+      ],
+      "evse_id": "BE-BEC-E041503002",
+      "floor_level": "-2",
+      "last_updated": "2015-06-29T20:39:09Z",
+      "physical_reference": "2",
+      "status": "RESERVED",
+      "uid": "3257"
+    }
+  ],
+  "id": "LOC1",
+  "last_updated": "2015-06-29T20:39:09Z",
+  "name": "Gent Zuid",
+  "operator": {
+    "name": "BeCharged"
+  },
+  "postal_code": "9000",
+  "type": "ON_STREET"
+}

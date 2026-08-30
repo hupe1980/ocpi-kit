@@ -1,0 +1,14 @@
+xtask — repository automation for ocpi-kit
+
+  sync-fixtures            Copy every JSON example from specs/src/ into fixtures/, and extract
+                           the inline examples that OCPI 2.1.1 embeds in Markdown.
+
+  spec-coverage [--check]  Parse the property tables out of the vendored specification and
+                           compare them with the fields this crate defines. Reports every field
+                           the spec has and the crate does not, and vice versa.
+                           With --check, exits non-zero when anything is missing, which is what
+                           CI runs.
+
+  no-floats                Scan the wire models and the pricing engine for `f32`/`f64`. Money in
+                           OCPI is an exact decimal; a float in an object field or a cost
+                           computation is a defect. CI runs it.

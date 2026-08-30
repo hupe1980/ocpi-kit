@@ -1,0 +1,8 @@
+# The oldest Rust this crate supports; keeps clippy from suggesting newer APIs.
+msrv = "1.96"
+
+# Note on floats: money in OCPI is never a float, and this crate enforces that — but not here.
+# `clippy::disallowed_types` fires on the `visit_f64` that serde's `Deserialize` derive generates
+# for *every* struct, so as a lint it says nothing about the code that was written. The rule is
+# checked instead by `cargo run -p xtask -- no-floats`, which scans the wire models and the
+# pricing engine for float types in code this crate actually wrote. CI runs it.

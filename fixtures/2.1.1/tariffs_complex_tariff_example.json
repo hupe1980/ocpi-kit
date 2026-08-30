@@ -1,0 +1,100 @@
+{
+  "currency": "EUR",
+  "elements": [
+    {
+      "price_components": [
+        {
+          "price": 2.5,
+          "step_size": 1,
+          "type": "FLAT"
+        }
+      ]
+    },
+    {
+      "price_components": [
+        {
+          "price": 1.0,
+          "step_size": 900,
+          "type": "TIME"
+        }
+      ],
+      "restrictions": {
+        "max_power": 32.0
+      }
+    },
+    {
+      "price_components": [
+        {
+          "price": 2.0,
+          "step_size": 600,
+          "type": "TIME"
+        }
+      ],
+      "restrictions": {
+        "day_of_week": [
+          "MONDAY",
+          "TUESDAY",
+          "WEDNESDAY",
+          "THURSDAY",
+          "FRIDAY"
+        ],
+        "min_power": 32.0
+      }
+    },
+    {
+      "price_components": [
+        {
+          "price": 1.25,
+          "step_size": 600,
+          "type": "TIME"
+        }
+      ],
+      "restrictions": {
+        "day_of_week": [
+          "SATURDAY",
+          "SUNDAY"
+        ],
+        "min_power": 32.0
+      }
+    },
+    {
+      "price_components": [
+        {
+          "price": 5.0,
+          "step_size": 300,
+          "type": "PARKING_TIME"
+        }
+      ],
+      "restrictions": {
+        "day_of_week": [
+          "MONDAY",
+          "TUESDAY",
+          "WEDNESDAY",
+          "THURSDAY",
+          "FRIDAY"
+        ],
+        "end_time": "18:00",
+        "start_time": "09:00"
+      }
+    },
+    {
+      "price_components": [
+        {
+          "price": 6.0,
+          "step_size": 300,
+          "type": "PARKING_TIME"
+        }
+      ],
+      "restrictions": {
+        "day_of_week": [
+          "SATURDAY"
+        ],
+        "end_time": "17:00",
+        "start_time": "10:00"
+      }
+    }
+  ],
+  "id": "11",
+  "last_updated": "2015-06-29T20:39:09Z",
+  "tariff_alt_url": "https://company.com/tariffs/11"
+}

@@ -40,6 +40,8 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets --all-features
+      - run: cargo clippy --all-targets
+      - run: cargo clippy --all-targets --no-default-features
 
   test:
     name: test (${{ matrix.os }}, ${{ matrix.rust }})
@@ -60,6 +62,30 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all-features
       - run: cargo test --no-default-features
+      - run: cargo test  # default features
+      # The benchmarks are not run in CI — the numbers would be meaningless on a shared runner —
+      # but they must keep compiling, or they rot into a second, unbuilt copy of the API.
+      - run: cargo bench --all-features --no-run
+
+  spec:
+    name: spec conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # No float may appear in a wire model or in the pricing engine. Reads src/ only.
+      - run: cargo run -p xtask -- no-floats
+      # Every object's fields must still match the specification's own property tables. This
+      # needs a checkout of the OCPI sources under specs/src/, which the repository does not
+      # vendor (the specification is CC BY-ND); see site/content/docs/reference/traceability.md.
+      - name: spec coverage
+        run: |
+          if [ -d specs/src ]; then
+            cargo run -p xtask -- spec-coverage --check
+          else
+            echo "::notice::specs/src/ is not present; run 'cargo run -p xtask -- spec-coverage --check' locally against an OCPI checkout"
+          fi
 
   msrv:
     name: MSRV
@@ -83,7 +109,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-hack
-      - run: cargo hack check --feature-powerset --no-dev-deps
+      # Every feature on its own, then every pair of the layer features. A full powerset of
+      # sixteen features is 65_536 builds; the pairs catch the missing `cfg` gates that matter.
+      - run: cargo hack check --each-feature --no-dev-deps
+      - run: |
+          cargo hack check --feature-powerset --depth 2 --no-dev-deps \
+            --include-features v2_1_1,v2_2_1,v2_3_0,bookings,invoice-reconciliation,transport,client,server,hub,convert,tariffs,testkit,schema
 
   docs:
     name: rustdoc
@@ -114,11 +145,23 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo package --locked
 
+  site:
+    name: site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: taiki-e/install-action@zola
+      - run: zola --root site build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: site
+          path: site/public
+
   # Single job for branch protection to depend on.
   ci-ok:
     name: CI OK
     if: always()
-    needs: [fmt, clippy, test, msrv, features, docs, deny, package]
+    needs: [fmt, clippy, test, spec, msrv, features, docs, deny, site, package]
     runs-on: ubuntu-latest
     steps:
       - name: Check all jobs succeeded

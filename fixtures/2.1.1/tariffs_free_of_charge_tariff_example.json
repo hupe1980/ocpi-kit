@@ -1,0 +1,16 @@
+{
+  "currency": "EUR",
+  "elements": [
+    {
+      "price_components": [
+        {
+          "price": 0.0,
+          "step_size": 0,
+          "type": "FLAT"
+        }
+      ]
+    }
+  ],
+  "id": "12",
+  "last_updated": "2015-06-29T20:39:09Z"
+}

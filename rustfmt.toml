@@ -1,0 +1,6 @@
+# The source is written at 110 columns with small constructs kept on one line: an OCPI object is a
+# transcription of a property table, and a field per line for three-field structs turns a readable
+# table into a scroll. `Max` heuristics let a struct literal, pattern or call stay inline as long
+# as it fits.
+max_width = 110
+use_small_heuristics = "Max"

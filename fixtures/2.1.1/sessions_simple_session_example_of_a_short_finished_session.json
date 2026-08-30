@@ -1,0 +1,83 @@
+{
+  "auth_id": "DE8ACC12E46L89",
+  "auth_method": "WHITELIST",
+  "charging_periods": [
+    {
+      "dimensions": [
+        {
+          "type": "ENERGY",
+          "volume": 120
+        },
+        {
+          "type": "MAX_CURRENT",
+          "volume": 30
+        }
+      ],
+      "start_date_time": "2015-06-29T22:39:09Z"
+    },
+    {
+      "dimensions": [
+        {
+          "type": "ENERGY",
+          "volume": 41000
+        },
+        {
+          "type": "MIN_CURRENT",
+          "volume": 34
+        }
+      ],
+      "start_date_time": "2015-06-29T22:40:54Z"
+    },
+    {
+      "dimensions": [
+        {
+          "type": "PARKING_TIME",
+          "volume": 0.718
+        }
+      ],
+      "start_date_time": "2015-06-29T23:07:09Z"
+    }
+  ],
+  "currency": "EUR",
+  "end_datetime": "2015-06-29T23:50:16Z",
+  "id": "101",
+  "kwh": 41.0,
+  "last_updated": "2015-06-29T23:09:10Z",
+  "location": {
+    "address": "F.Rooseveltlaan 3A",
+    "city": "Gent",
+    "coordinates": {
+      "latitude": "3.729944",
+      "longitude": "51.047599"
+    },
+    "country": "BE",
+    "evses": [
+      {
+        "connectors": [
+          {
+            "amperage": 64,
+            "format": "SOCKET",
+            "id": "1",
+            "last_updated": "2015-06-29T23:09:10Z",
+            "power_type": "AC_1_PHASE",
+            "standard": "IEC_62196_T2",
+            "tariff_id": "11",
+            "voltage": 230
+          }
+        ],
+        "evse_id": "BE-BEC-E041503003",
+        "last_updated": "2015-06-29T23:09:10Z",
+        "status": "AVAILABLE",
+        "uid": "3256"
+      }
+    ],
+    "id": "LOC1",
+    "last_updated": "2015-06-29T23:09:10Z",
+    "name": "Gent Zuid",
+    "postal_code": "9000",
+    "type": "ON_STREET"
+  },
+  "start_datetime": "2015-06-29T22:39:09Z",
+  "status": "COMPLETED",
+  "total_cost": 8.5
+}

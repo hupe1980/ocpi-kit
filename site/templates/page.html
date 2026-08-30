@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block body_class %}docs{% endblock %}
+
+{% block content %}
+<div class="docs-shell">
+  {% include "partials/sidebar.html" %}
+
+  <article class="docs-body">
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <ol>
+        <li><a href="{{ get_url(path='@/_index.md') }}">Home</a></li>
+        <li><a href="{{ get_url(path='@/docs/_index.md') }}">Docs</a></li>
+        {% if section %}<li><a href="{{ section.permalink }}">{{ section.title }}</a></li>{% endif %}
+        <li aria-current="page">{{ page.title }}</li>
+      </ol>
+    </nav>
+
+    <h1>{{ page.title }}</h1>
+    {% if page.description %}<p class="page-lede">{{ page.description }}</p>{% endif %}
+
+    {% if page.toc | length > 1 %}
+    <details class="toc">
+      <summary>On this page</summary>
+      <ul>
+        {% for h in page.toc %}<li><a href="{{ h.permalink | safe }}">{{ h.title }}</a></li>{% endfor %}
+      </ul>
+    </details>
+    {% endif %}
+
+    <div class="prose">
+      {{ page.content | safe }}
+    </div>
+
+    <nav class="pager" aria-label="Pagination">
+      {% if page.lower %}<a class="prev" href="{{ page.lower.permalink }}"><span>Previous</span>{{ page.lower.title }}</a>{% endif %}
+      {% if page.higher %}<a class="next" href="{{ page.higher.permalink }}"><span>Next</span>{{ page.higher.title }}</a>{% endif %}
+    </nav>
+
+    <p class="edit">
+      <a href="{{ config.extra.repo }}/edit/main/site/content/{{ page.relative_path }}" rel="noopener">
+        Improve this page on GitHub
+      </a>
+    </p>
+  </article>
+</div>
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": {{ page.title | json_encode | safe }},
+  "description": {{ page.description | default(value=config.description) | json_encode | safe }},
+  "url": "{{ page.permalink }}",
+  "isPartOf": { "@type": "WebSite", "name": "ocpi-kit", "url": "{{ config.base_url }}" },
+  "author": { "@type": "Person", "name": "{{ config.extra.author }}" }
+}
+</script>
+{% endblock %}

@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en" class="no-js">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+{%- if page -%}
+  {%- set page_title = page.title -%}
+  {%- set page_desc = page.description | default(value=config.description) -%}
+  {%- set canonical = page.permalink -%}
+  {%- set is_home = false -%}
+{%- elif section -%}
+  {%- set page_title = section.title -%}
+  {%- set page_desc = section.description | default(value=config.description) -%}
+  {%- set canonical = section.permalink -%}
+  {%- set is_home = section.path == "/" -%}
+{%- else -%}
+  {%- set page_title = config.title -%}
+  {%- set page_desc = config.description -%}
+  {%- set canonical = config.base_url -%}
+  {%- set is_home = false -%}
+{%- endif -%}
+
+<title>{% if is_home %}{{ page_title }}{% else %}{{ page_title }} · ocpi-kit{% endif %}</title>
+<meta name="description" content="{{ page_desc }}">
+<meta name="keywords" content="{{ config.extra.keywords }}">
+<meta name="author" content="{{ config.extra.author }}">
+<link rel="canonical" href="{{ canonical }}">
+<meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
+
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="ocpi-kit">
+<meta property="og:title" content="{{ page_title }}">
+<meta property="og:description" content="{{ page_desc }}">
+<meta property="og:url" content="{{ canonical }}">
+<meta property="og:locale" content="en_GB">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="{{ page_title }}">
+<meta name="twitter:description" content="{{ page_desc }}">
+
+<meta name="theme-color" content="#0d1117" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<meta name="color-scheme" content="light dark">
+
+<link rel="icon" href="{{ get_url(path='favicon.svg') }}" type="image/svg+xml">
+<link rel="stylesheet" href="{{ get_url(path='style.css') | safe }}">
+<link rel="alternate" type="application/atom+xml" title="ocpi-kit" href="{{ get_url(path='atom.xml') | safe }}">
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareSourceCode",
+  "name": "ocpi-kit",
+  "description": {{ config.description | json_encode | safe }},
+  "url": "{{ config.base_url }}",
+  "codeRepository": "{{ config.extra.repo }}",
+  "programmingLanguage": "Rust",
+  "license": "https://spdx.org/licenses/MIT.html",
+  "author": { "@type": "Person", "name": "{{ config.extra.author }}" },
+  "keywords": {{ config.extra.keywords | json_encode | safe }}
+}
+</script>
+
+<script>document.documentElement.classList.remove('no-js');</script>
+</head>
+<body class="{% block body_class %}{% endblock %}">
+
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="{{ get_url(path='@/_index.md') }}">
+      <span class="brand-mark" aria-hidden="true">◈</span>
+      <span class="brand-name">ocpi-kit</span>
+    </a>
+    <nav class="topnav" aria-label="Main">
+      <a href="{{ get_url(path='@/docs/_index.md') }}">Docs</a>
+      <a href="{{ config.extra.api_docs }}" rel="noopener">API</a>
+      <a href="{{ config.extra.crate }}" rel="noopener">crates.io</a>
+      <a href="{{ config.extra.repo }}" rel="noopener">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+{% block content %}{% endblock %}
+</main>
+
+<footer class="footer">
+  <div class="footer-inner">
+    <p>
+      <strong>ocpi-kit</strong> — dual-licensed
+      <a href="{{ config.extra.repo }}/blob/main/LICENSE-MIT" rel="noopener">MIT</a> or
+      <a href="{{ config.extra.repo }}/blob/main/LICENSE-APACHE" rel="noopener">Apache-2.0</a>.
+    </p>
+    <p class="muted">
+      OCPI is a protocol owned and maintained by the
+      <a href="https://evroaming.org/" rel="noopener">EVRoaming Foundation</a>.
+      This project is not affiliated with the EVRoaming Foundation.
+    </p>
+  </div>
+</footer>
+
+<script>
+(function () {
+  var toggle = document.querySelector('.sidebar-toggle');
+  var list = document.getElementById('sidebar-list');
+  if (toggle && list) {
+    toggle.addEventListener('click', function () {
+      var open = list.classList.toggle('is-open');
+      toggle.setAttribute('aria-expanded', String(open));
+    });
+  }
+  document.querySelectorAll('.copy').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      navigator.clipboard.writeText(btn.dataset.copy).then(function () {
+        var was = btn.textContent;
+        btn.textContent = 'Copied';
+        setTimeout(function () { btn.textContent = was; }, 1400);
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>
