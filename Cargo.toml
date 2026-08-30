@@ -1,0 +1,19 @@
+[package]
+name = "ocpi-kit"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.96"
+description = "OCPI (Open Charge Point Interface) toolkit for EV roaming: typed models, client, server and hub building blocks. Placeholder release, work in progress."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/hupe1980/ocpi-kit"
+homepage = "https://github.com/hupe1980/ocpi-kit"
+documentation = "https://docs.rs/ocpi-kit"
+readme = "README.md"
+keywords = ["ocpi", "ev", "charging", "roaming", "emobility"]
+categories = ["network-programming", "web-programming", "api-bindings"]
+exclude = ["/specs", "/CONCEPT.md", "/.github"]
+
+[lib]
+name = "ocpi_kit"
+
+[dependencies]
