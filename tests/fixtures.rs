@@ -233,11 +233,16 @@ impl Validate for EnergyMixExample {
 
 /// `payment_terminal_create_minimal.json` is a Terminal creation body: `terminal_id` only, with
 /// no `last_updated` — which the Terminal object requires, because the server assigns it.
+///
+/// The example belongs to the `payments` release branch, so the type it is read into is gated the
+/// same way its corpus is.
+#[cfg(feature = "payments")]
 #[derive(serde::Serialize, serde::Deserialize)]
 struct TerminalMinimal {
     terminal_id: ocpi_kit::types::CiString<36>,
 }
 
+#[cfg(feature = "payments")]
 impl Validate for TerminalMinimal {
     fn validate_in(&self, v: &mut ocpi_kit::types::Validator) {
         v.field("terminal_id", &self.terminal_id);
@@ -570,9 +575,8 @@ fn expectations_2_1_1() -> BTreeMap<&'static str, Expect> {
 
 /// The 2.3.0 `payments` release branch carries the whole 2.3.0 core plus the Payments module.
 ///
-/// Upstream moved Payments out of core in July 2026, onto its own release branch — the same shape
-/// the Bookings module has always had. Its examples therefore live in this corpus rather than in
-/// the core one, and the core corpus no longer carries any.
+/// Payments is not part of 2.3.0 core — the branch defines it, the same shape the Bookings module
+/// has — so its examples live in this corpus and not in the core one.
 #[cfg(feature = "payments")]
 fn expectations_payments() -> BTreeMap<&'static str, Expect> {
     use ocpi_kit::v2_3_0::payments::{FinancialAdviceConfirmation, Terminal};
