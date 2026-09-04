@@ -62,6 +62,7 @@ everything downstream for reasons that are hard to read.
 | `endpoints.unique` | no `(module, role)` pair listed twice |
 | `endpoints.known` | no module advertised that does not exist in that version |
 | `endpoints.absolute` | every endpoint URL is absolute |
+| `endpoints.reachable` | every endpoint URL is one a partner may actually call |
 | `details.conform` | the version-details object itself conforms |
 | `headers.request_id` / `headers.correlation_id` | both echoed on the response |
 | `headers.timestamp` | the envelope timestamp is within the clock skew you allow |
@@ -69,12 +70,22 @@ everything downstream for reasons that are hard to read.
 | `module.page` | each offered Sender interface returns a decodable page |
 | `module.limit` / `module.xlimit` | the requested `limit` is never exceeded, and `X-Limit` agrees |
 | `module.link` / `module.total` | `X-Total-Count` is sent, and `Link: rel="next"` appears exactly when it says there is more |
+| `module.link_host` | the next link stays on the same host and passes the `UrlPolicy` |
 | `module.objects` | the objects on the page conform |
 | `module.offset` | `offset` is actually applied |
 | `module.date_from` | `date_from` is actually applied |
 
 Every check names the specification anchor it comes from, so a failing line pastes straight into a
 ticket without anyone having to look up the clause.
+
+### `endpoints.reachable`
+
+The one failure a peer cannot see from its own side. A version-details document is generated from
+whatever base URL the process was configured with, and behind a reverse proxy that is routinely an
+internal address — so the peer publishes `http://10.0.0.5:8080/ocpi/cpo/2.3.0/locations` to the
+whole network, every partner's SSRF guard declines it (including this crate's,
+[by default](@/docs/reference/security.md)), and the peer's own tests pass because they run inside
+the network where it resolves.
 
 ### The last two
 

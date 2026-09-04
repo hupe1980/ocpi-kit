@@ -6,6 +6,7 @@
 //! ocpi pull locations https://… --token … --limit 50
 //! ocpi pull payment-terminals https://… --token …
 //! ocpi price cdr.json --tariff tariff.json --time-zone Europe/Berlin
+//! ocpi lint tariff.json                                 # legal, and still wrong
 //! ocpi convert location.json --from 2.2.1 --to 2.3.0   # with a loss report
 //! ocpi schema location --version 2.3.0                  # JSON Schema
 //! ```
@@ -119,6 +120,14 @@ enum Command {
         #[arg(long)]
         no_step_size: bool,
         /// Print the breakdown as JSON rather than as a table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check a Tariff for the mistakes that are legal and still bill the wrong amount.
+    Lint {
+        /// A Tariff, as JSON.
+        tariff: PathBuf,
+        /// Print the findings as JSON rather than as lines.
         #[arg(long)]
         json: bool,
     },
@@ -300,6 +309,7 @@ fn run(cli: Cli) -> Fallible {
         Command::Price { cdr, tariffs, time_zone, no_step_size, json } => {
             price(&cdr, &tariffs, &time_zone, no_step_size, json)
         }
+        Command::Lint { tariff, json } => lint(&tariff, json),
         Command::Convert { file, object, from, to } => convert(&file, object, from, to),
         Command::Schema { object, version } => schema(object, version),
         Command::Versions { url, token, unencoded_token } => {
@@ -431,31 +441,69 @@ fn price(
     };
     let breakdown = PricingEngine::with_policy(policy).price(&session, &tariffs)?;
 
-    let claimed = cdr.total_cost.before_taxes;
-    let agrees = claimed == breakdown.total_excl_vat;
+    // Every figure the CDR claims, against what its own Charging Periods and Tariff produce —
+    // including the ones it makes about itself, which need no tariff to check.
+    let check = ocpi_kit::tariffs::verify_cdr(&cdr, &breakdown);
 
     if as_json {
         println!("{}", serde_json::to_string_pretty(&breakdown)?);
     } else {
         println!("{breakdown}");
-        if agrees {
-            println!("\nthe CDR's own total agrees");
-        } else {
-            println!(
-                "\nthe CDR claims {claimed} excl. tax, which differs by {}",
-                claimed - breakdown.total_excl_vat
-            );
-        }
+        println!("\n{check}");
     }
 
     // Exit non-zero when the invoice does not check out, so this can be a pipeline step rather
     // than something a person has to read. A note is enough on its own: a CDR whose Charging
     // Periods span a price change can total correctly by luck and still be malformed.
-    if !agrees || breakdown.needs_review() {
+    if !check.agrees() || breakdown.needs_review() {
         return Err(Box::new(PricingDisagreement));
     }
     Ok(())
 }
+
+/// `ocpi lint` — the Tariff mistakes that are legal and still bill the wrong amount.
+fn lint(path: &std::path::Path, as_json: bool) -> Fallible {
+    let tariff: ocpi_kit::v2_3_0::tariffs::Tariff = serde_json::from_str(&read(path)?)?;
+    let findings = ocpi_kit::tariffs::lint(&tariff);
+
+    if as_json {
+        let rendered: Vec<_> = findings
+            .iter()
+            .map(|f| {
+                serde_json::json!({
+                    "code": f.code.as_str(),
+                    "pointer": f.pointer,
+                    "message": f.message,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&rendered)?);
+    } else if findings.is_empty() {
+        println!("no findings: this Tariff says what it looks like it says");
+    } else {
+        for finding in &findings {
+            println!("{finding}");
+        }
+        println!("\n{} finding(s)", findings.len());
+    }
+
+    // A lint finding is not a conformance failure — `ocpi validate` answers that question — so
+    // this exits non-zero to be usable as a gate on a tariff-publishing pipeline, which is the
+    // only place the answer is actionable before a driver is billed.
+    if findings.is_empty() { Ok(()) } else { Err(Box::new(TariffHasLints)) }
+}
+
+/// The error `ocpi lint` exits with, so a publishing pipeline can gate on it.
+#[derive(Debug)]
+struct TariffHasLints;
+
+impl std::fmt::Display for TariffHasLints {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("this Tariff has findings; see above")
+    }
+}
+
+impl std::error::Error for TariffHasLints {}
 
 /// The CDR did not price to what it claims, or priced with findings.
 #[derive(Debug)]

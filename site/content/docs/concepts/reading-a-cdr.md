@@ -117,9 +117,14 @@ local time. `DateTime::local_parts(offset_seconds)` converts, returning `LocalPa
 iso_weekday }` in the crate's own types:
 
 ```rust
-let local = cdr.start_date_time.local_parts(3600);   // CET
+let local = cdr.start_date_time.local_parts(3600)?;  // CET
 ```
 
 The offset has to come from somewhere. A `Location` carries an IANA `time_zone` name, and
 `tariffs::TimeZone` resolves it against the zone database — which is what you need for anything
 spanning a daylight-saving change, where a fixed offset is wrong for half the year.
+
+It is fallible for one reason: `9999-12-31T23:59:59Z` is a conformant OCPI `DateTime`, a peer can
+send one, and shifting it by the offset of a Location in `Pacific/Kiritimati` lands outside the
+range a date can hold. Returning an error is the alternative to a panic in the middle of pricing
+somebody else's CDR.

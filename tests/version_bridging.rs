@@ -79,8 +79,12 @@ fn every_2_2_1_tariff_example_survives_a_round_trip_through_2_3_0() {
         "tariffrestriction_example_max_duration.json",
         "tariffrestriction_example_max_power.json",
     ] {
-        let (up, _down) = round_trip!(name, v2_2_1::tariffs::Tariff, v2_3_0::tariffs::Tariff);
+        let (up, down) = round_trip!(name, v2_2_1::tariffs::Tariff, v2_3_0::tariffs::Tariff);
         assert!(up.is_empty(), "{name}: upgrading a Tariff loses nothing");
+        // And neither does coming back, for a Tariff that says its prices exclude tax — which
+        // every 2.2.1 Tariff does by definition. `min_price`/`max_price` carry both bounds, so
+        // there is nothing here to report; a loss on this path would be a false alarm.
+        assert!(down.is_empty(), "{name}: coming back lost {down}");
     }
 }
 
@@ -275,4 +279,165 @@ fn assert_reports(lossy: &Lossy, pointer: &str) {
         lossy.as_slice().iter().any(|l| l.pointer == pointer),
         "expected a loss at {pointer}, got: {lossy}"
     );
+}
+
+/// Every field a downgrade drops must appear in its loss report — mechanically, over the whole
+/// 2.3.0 corpus.
+///
+/// The round-trip tests above prove that a 2.2.1 object survives a visit to 2.3.0. They cannot
+/// prove the *other* direction is honest, because going back always loses something and a test
+/// that only checks the value would pass a conversion that dropped a field silently — which is
+/// exactly the failure this crate claims not to have.
+///
+/// So this walks the JSON: every leaf pointer present in the 2.3.0 document and absent from the
+/// 2.2.1 one has to be **named** by the [`Lossy`] report, either exactly or by a prefix. A new
+/// 2.3.0 field added to a wire model without a matching `lossy.record` fails here on its first
+/// run, in whichever example happens to use it.
+mod nothing_is_dropped_in_silence {
+    use super::{Lossy, Path};
+    use ocpi_kit::VersionNumber;
+    use ocpi_kit::convert::wire::ObjectKind;
+    use serde_json::Value;
+
+    fn fixture_2_3_0(name: &str) -> Value {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/2.3.0").join(name);
+        let text =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("{name}: {e}"))
+    }
+
+    /// Every leaf pointer in `value`, in RFC 6901 form.
+    fn leaves(value: &Value, at: &str, out: &mut Vec<String>) {
+        match value {
+            Value::Object(map) if !map.is_empty() => {
+                for (key, child) in map {
+                    leaves(child, &format!("{at}/{}", key.replace('~', "~0").replace('/', "~1")), out);
+                }
+            }
+            Value::Array(items) if !items.is_empty() => {
+                for (index, child) in items.iter().enumerate() {
+                    leaves(child, &format!("{at}/{index}"), out);
+                }
+            }
+            _ => out.push(at.to_owned()),
+        }
+    }
+
+    /// The fields 2.3.0 **renamed** rather than added, whose value is still there under another
+    /// name.
+    ///
+    /// Keeping this list explicit is the point: every entry is a claim that the information
+    /// survived, and anything not on it has to be either present or reported. It is short, and it
+    /// is the whole semantic difference between the two versions' money.
+    fn is_renamed(pointer: &str) -> bool {
+        // `Price`/`PriceLimit`: `{before_taxes, taxes[]}` in 2.3.0, `{excl_vat, incl_vat}` in
+        // 2.2.1. The amounts cross; the tax *names* do not, and those are reported as losses.
+        pointer.ends_with("/before_taxes")
+            || pointer.ends_with("/after_taxes")
+            || pointer.contains("/taxes/")
+            // 2.2.1 has no `tax_included` because it has no other reading: a 2.2.1
+            // `PriceComponent.price` is "Price per unit (excl. VAT)" by definition. Downgrading a
+            // Tariff that says anything *other* than NO is recorded as a loss.
+            || pointer == "/tax_included"
+    }
+
+    /// Whether `pointer` is named by a loss, exactly or as one of its descendants.
+    fn is_reported(pointer: &str, lossy: &Lossy) -> bool {
+        lossy.iter().any(|loss| {
+            let named = loss.pointer.trim_end_matches('/');
+            !named.is_empty() && (pointer == named || pointer.starts_with(&format!("{named}/")))
+        })
+    }
+
+    fn check(kind: ObjectKind, name: &str) {
+        let source = fixture_2_3_0(name);
+        let converted = kind
+            .bridge(&VersionNumber::V2_3_0, &VersionNumber::V2_2_1, source.clone())
+            .unwrap_or_else(|e| panic!("{name} does not bridge: {e}"));
+
+        let mut before = Vec::new();
+        leaves(&source, "", &mut before);
+        let mut after = Vec::new();
+        leaves(&converted.value, "", &mut after);
+
+        for pointer in before {
+            if after.contains(&pointer) || is_renamed(&pointer) || is_reported(&pointer, &converted.lossy) {
+                continue;
+            }
+            // A value that merely *moved* is fine as long as the move is reported; one that is
+            // gone with nothing said about it is the failure this test exists for.
+            panic!(
+                "{name}: {pointer} is in the 2.3.0 document, not in the 2.2.1 one, and not in the \
+                 loss report ({})",
+                if converted.lossy.is_empty() {
+                    "which is empty".to_owned()
+                } else {
+                    converted.lossy.to_string()
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn locations() {
+        for name in [
+            "location_example.json",
+            "location_example_parking_garage_opening_hours.json",
+            "location_example_uc2_destination_charger.json",
+            "location_example_uc3_destination_charger_not_published.json",
+            "location_example_uc4_limited_visibility.json",
+            "location_example_uc5_home_charge_point.json",
+        ] {
+            check(ObjectKind::Location, name);
+        }
+    }
+
+    #[test]
+    fn tariffs() {
+        for name in [
+            "tariff_1_simple_2hour.json",
+            "tariff_4_complex.json",
+            "tariff_6_025kwh_start_max_price.json",
+            "tariff_12_025kwh_min_price.json",
+            "tariff_13_simple_3hour_5parking.json",
+            "tariff_19_simple_north_american_exclusive.json",
+            "tariff_20_simple_north_american_inclusive.json",
+        ] {
+            check(ObjectKind::Tariff, name);
+        }
+    }
+
+    #[test]
+    fn sessions_and_cdrs() {
+        for name in ["session_example_1_simple_start.json", "session_example_2_short_finished.json"] {
+            check(ObjectKind::Session, name);
+        }
+        // The specification's own 2.3.0 CDR example cannot be bridged, because it cannot be
+        // decoded: the Tariff it embeds omits `tax_included`, which 2.3.0 makes required. That is
+        // a recorded erratum, and asserting it *here* as well means an upstream fix turns this
+        // test red and says to price the example instead of excusing it.
+        let broken = fixture_2_3_0("cdr_example.json");
+        let error = ObjectKind::Cdr
+            .bridge(&VersionNumber::V2_3_0, &VersionNumber::V2_2_1, broken)
+            .expect_err("the spec's own CDR example is still missing tax_included");
+        assert!(error.to_string().contains("tax_included"), "{error}");
+    }
+
+    #[test]
+    fn credentials_and_tokens() {
+        for name in [
+            "credentials_example.json",
+            "credentials_example2.json",
+            "credentials_example3.json",
+            "credentials_example4.json",
+        ] {
+            check(ObjectKind::Credentials, name);
+        }
+        for name in ["token_example_1_full_example.json", "token_example_2_minimal_example.json"] {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/2.3.0").join(name);
+            if path.exists() {
+                check(ObjectKind::Token, name);
+            }
+        }
+    }
 }

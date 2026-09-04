@@ -16,7 +16,7 @@ server.
 | `send_unencoded_token` | A peer that only accepts it unencoded |
 | `omit_routing_headers` | 2.1.1 peers, where the `OCPI-to-*` headers do not exist |
 | `case_insensitive_module_ids` | `Booking` vs `bookings`, and other casing drift in module ids |
-| `peer_max_page_limit` | Clamps our outgoing `limit` to what **the peer** tolerates. Named for the side it describes: `ServerConfig::max_page_limit` is the cap *this* process puts on the pages it serves |
+| `peer_max_page_limit` | Clamps this client's outgoing `limit` to what **the peer** tolerates. Named for the side it describes: `ServerConfig::max_page_limit` is the cap *this* process puts on the pages it serves |
 | `lenient_content_type` | A peer sending something other than `application/json` |
 
 Six flags, and **every one of them changes behaviour**. That is enforced rather than hoped:

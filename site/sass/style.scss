@@ -156,6 +156,8 @@ pre code { background: none; border: 0; padding: 0; font-size: inherit; }
 .grid-2 { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
 .grid-3 { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
 .grid-4 { grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
+/* Four pillars, so two rows of two rather than three and a stray. */
+.pillars .grid-3 { grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); }
 
 .card {
   background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius);

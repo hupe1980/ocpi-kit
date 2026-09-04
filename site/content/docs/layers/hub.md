@@ -7,6 +7,19 @@ description = "Routing, broadcast push, open routing, GET All, and bridging mess
 Routing, broadcast push, open routing, GET All, and version bridging — the thing that sits between
 many CPOs and eMSPs, translating versions and fanning messages out.
 
+## Fanning out
+
+A Broadcast Push and a GET All both reach every connected platform, and both are **concurrent**
+and bounded: `Forwarder::with_concurrency` (default 16) decides how many at once. One at a time
+makes a broadcast to fifty platforms take the sum of fifty timeouts, with the sending party
+waiting for all of it; unbounded opens fifty sockets because one party pushed one Location.
+Results come back in the order the parties were given, so a report reads the same way on every
+run.
+
+A party that times out is `4002 Timeout on forwarded request` and one that refuses the connection
+is `4003` — told apart by what `reqwest` reports rather than by looking for the word "timeout" in
+a message another crate formats.
+
 ## The four routing arrangements
 
 A hub can tell which one it is looking at from the headers and the method alone, which is what

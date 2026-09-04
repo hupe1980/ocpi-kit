@@ -23,6 +23,16 @@ target
 # Zola build output
 /site/public
 
+# Fuzzing: the targets and the seeder are committed, the corpus and artifacts are generated
+# (`cargo run -p xtask -- fuzz-corpus`) and the build output is enormous.
+/fuzz/target/
+/fuzz/corpus/
+/fuzz/artifacts/
+/fuzz/coverage/
+
 # Internal-only material (not part of the published crate)
 /specs/
 .DS_Store
+
+# Internal architecture notes (not part of the published crate)
+/concepts/

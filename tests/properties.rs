@@ -483,9 +483,20 @@ mod pricing {
         ))
     }
 
+    /// All three readings of `tax_included`, because each one means something different by
+    /// `quantity × price` and the breakdown's invariants have to hold under every one of them.
+    fn any_tax_basis() -> impl Strategy<Value = TaxIncluded> {
+        proptest::prop_oneof![Just(TaxIncluded::No), Just(TaxIncluded::Yes), Just(TaxIncluded::NotApplicable)]
+    }
+
     fn any_tariff() -> impl Strategy<Value = Tariff> {
-        (proptest::collection::vec((any_amount(), any_vat(), 0u32..3600u32), 1..4), any_limit(), any_limit())
-            .prop_map(|(components, min_price, max_price)| {
+        (
+            proptest::collection::vec((any_amount(), any_vat(), 0u32..3600u32), 1..4),
+            any_limit(),
+            any_limit(),
+            any_tax_basis(),
+        )
+            .prop_map(|(components, min_price, max_price, tax_included)| {
                 let dimensions = [
                     TariffDimensionType::Energy,
                     TariffDimensionType::Time,
@@ -509,7 +520,7 @@ mod pricing {
                     .id("prop")
                     .currency("EUR")
                     .elements(vec![TariffElement::builder().price_components(price_components).build()])
-                    .tax_included(TaxIncluded::No)
+                    .tax_included(tax_included)
                     .last_updated("2024-01-15T10:00:00Z".parse::<DateTime>().expect("valid"))
                     .build();
                 tariff.min_price = min_price;

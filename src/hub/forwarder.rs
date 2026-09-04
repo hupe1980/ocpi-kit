@@ -140,6 +140,14 @@ pub enum Unbridgeable {
     RelayVerbatim,
 }
 
+/// How many parties a fan-out contacts at once, unless configured otherwise.
+///
+/// A Broadcast Push to fifty connected platforms, one at a time, with the client's timeout on
+/// each, takes as long as the slowest fifty put together — and the sender is waiting for all of
+/// it. Sixteen at a time keeps a hub's own connection pool and its partners' rate limits in view
+/// while making the fan-out bounded by the slowest party rather than by their sum.
+pub const DEFAULT_FANOUT_CONCURRENCY: usize = 16;
+
 /// Relays requests to the platforms in a [`RoutingTable`].
 #[derive(Debug)]
 pub struct Forwarder<'a> {
@@ -148,13 +156,31 @@ pub struct Forwarder<'a> {
     hub: PartyRef,
     unbridgeable: Unbridgeable,
     report_losses: bool,
+    concurrency: usize,
 }
 
 impl<'a> Forwarder<'a> {
     /// A forwarder for the hub party `hub`.
     #[must_use]
     pub fn new(transport: &'a Transport, table: &'a RoutingTable, hub: PartyRef) -> Self {
-        Self { transport, table, hub, unbridgeable: Unbridgeable::default(), report_losses: true }
+        Self {
+            transport,
+            table,
+            hub,
+            unbridgeable: Unbridgeable::default(),
+            report_losses: true,
+            concurrency: DEFAULT_FANOUT_CONCURRENCY,
+        }
+    }
+
+    /// How many parties a Broadcast Push or a GET All contacts at once.
+    ///
+    /// Defaults to [`DEFAULT_FANOUT_CONCURRENCY`]. `0` is read as `1`, which is a strictly
+    /// sequential fan-out.
+    #[must_use]
+    pub const fn with_concurrency(mut self, parties: usize) -> Self {
+        self.concurrency = if parties == 0 { 1 } else { parties };
+        self
     }
 
     /// What to do with a message between two versions this build cannot translate.
@@ -367,13 +393,27 @@ impl<'a> Forwarder<'a> {
         sender_role: crate::v2_3_0::types::Role,
     ) -> Vec<Relayed> {
         let targets = self.table.broadcast_targets(&request.routing.from, sender_role, &request.module);
-        let mut results = Vec::with_capacity(targets.len());
-        for (_, party) in targets {
-            // "Broadcast request | Hub to receiving platform | Receiving-party | Hub"
-            let routing = RoutingHeaders::new(self.hub.clone(), party.clone());
-            results.push(self.relay(request, &party, routing).await);
-        }
-        results
+        // "Broadcast request | Hub to receiving platform | Receiving-party | Hub"
+        self.fan_out(request, targets.into_iter().map(|(_, party)| (self.hub.clone(), party))).await
+    }
+
+    /// Relays to many parties at once, yielding the results in the order the parties were given.
+    ///
+    /// The concurrency is bounded by [`with_concurrency`](Self::with_concurrency): a hub with two
+    /// hundred connected platforms should not open two hundred sockets because one party pushed
+    /// one Location.
+    async fn fan_out(
+        &self,
+        request: &Forwardable,
+        targets: impl Iterator<Item = (PartyRef, PartyRef)>,
+    ) -> Vec<Relayed> {
+        use futures_util::StreamExt as _;
+        let calls = targets.map(|(from, to)| async move {
+            self.relay(request, &to, RoutingHeaders::new(from, to.clone())).await
+        });
+        // `buffered` keeps the output in the order the calls were created, so a report reads the
+        // same way on every run.
+        futures_util::stream::iter(calls).buffered(self.concurrency).collect().await
     }
 
     /// Answers an Open Routing Request by asking the router to pick a destination.
@@ -414,18 +454,14 @@ impl<'a> Forwarder<'a> {
     /// Spec: 2.3.0 §transport_and_format_get_all_via_hubs
     pub async fn get_all(&self, request: &Forwardable) -> Vec<Relayed> {
         let sources = self.table.get_all_sources(&request.routing.from, &request.module);
-        let mut results = Vec::with_capacity(sources.len());
-        for (_, party) in sources {
-            // The GET All table covers only the two legs between the requester and the hub
-            // ("Requesting platform to Hub | Hub | Requesting-party"); it says nothing about the
-            // leg from the hub onward, because from the sending party's side that leg is an
-            // ordinary request. So it takes the ordinary relay headers — "Direct request | Hub to
-            // receiving platform | Receiving-party | Requesting-party" — which also means the
-            // answering party can see who actually asked, and authorise accordingly.
-            let routing = RoutingHeaders::new(request.routing.from.clone(), party.clone());
-            results.push(self.relay(request, &party, routing).await);
-        }
-        results
+        // The GET All table covers only the two legs between the requester and the hub
+        // ("Requesting platform to Hub | Hub | Requesting-party"); it says nothing about the leg
+        // from the hub onward, because from the sending party's side that leg is an ordinary
+        // request. So it takes the ordinary relay headers — "Direct request | Hub to receiving
+        // platform | Receiving-party | Requesting-party" — which also means the answering party
+        // can see who actually asked, and authorise accordingly.
+        let from = request.routing.from.clone();
+        self.fan_out(request, sources.into_iter().map(move |(_, party)| (from.clone(), party))).await
     }
 }
 
@@ -499,15 +535,14 @@ pub fn aggregate(results: &[Relayed], policy: AggregatePolicy) -> StatusCode {
 /// Maps a transport failure onto the hub error code that describes it.
 fn map_hub_error(error: OcpiError) -> OcpiError {
     match &error {
-        OcpiError::Transport(message) => {
-            let lower = message.to_ascii_lowercase();
-            let code = if lower.contains("timeout") || lower.contains("timed out") {
-                StatusCode::TIMEOUT_ON_FORWARDED_REQUEST
-            } else {
-                StatusCode::CONNECTION_PROBLEM
-            };
-            OcpiError::Remote { status_code: code, status_message: Some(message.clone()) }
-        }
+        OcpiError::Timeout(message) => OcpiError::Remote {
+            status_code: StatusCode::TIMEOUT_ON_FORWARDED_REQUEST,
+            status_message: Some(message.clone()),
+        },
+        OcpiError::Transport(message) => OcpiError::Remote {
+            status_code: StatusCode::CONNECTION_PROBLEM,
+            status_message: Some(message.clone()),
+        },
         _ => error,
     }
 }
@@ -653,9 +688,15 @@ mod tests {
 
     #[test]
     fn a_timeout_becomes_4002_and_a_refused_connection_4003() {
-        let timeout = map_hub_error(OcpiError::Transport("operation timed out".into()));
+        // The distinction comes from `reqwest::Error::is_timeout()`, carried through as a
+        // variant, rather than from looking for the word "timeout" in a message another crate
+        // formats.
+        let timeout = map_hub_error(OcpiError::Timeout("operation timed out".into()));
         assert_eq!(timeout.status_code(), StatusCode::TIMEOUT_ON_FORWARDED_REQUEST);
         let refused = map_hub_error(OcpiError::Transport("connection refused".into()));
         assert_eq!(refused.status_code(), StatusCode::CONNECTION_PROBLEM);
+        // A transport failure whose message happens to contain the word is still a 4003.
+        let misleading = map_hub_error(OcpiError::Transport("connect: timed out resolving".into()));
+        assert_eq!(misleading.status_code(), StatusCode::CONNECTION_PROBLEM);
     }
 }

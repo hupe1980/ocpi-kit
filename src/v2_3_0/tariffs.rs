@@ -15,12 +15,12 @@
 use bon::Builder;
 use serde::{Deserialize, Serialize};
 
-use crate::ocpi_enum;
 use crate::types::validate_fields;
 use crate::types::{
     CiString, CountryCode, Currency, DateTime, DisplayText, Extensions, LocalDate, LocalTime, Number,
     PartyId, PartyRef, Url, Validate, Validator, ViolationCode,
 };
+use crate::{ocpi_enum, ocpi_lenient_enum};
 
 use super::locations::EnergyMix;
 
@@ -64,7 +64,15 @@ pub struct Tariff {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_price: Option<PriceLimit>,
     /// The amount a Payment Terminal Provider should preauthorize for a Session with this
-    /// Tariff. New in OCPI 2.3.0, together with the Payments module.
+    /// Tariff.
+    ///
+    /// Defined by the OCPI 2.3.0 **`payments` release branch**, together with the module it is
+    /// about, so it lives behind the `payments` feature — the same shape as the `bookings`
+    /// branch's additions to core objects.
+    ///
+    /// Spec: 2.3.0 payments branch §mod_tariffs_preauthorize_amount_field
+    #[cfg(feature = "payments")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "payments")))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preauthorize_amount: Option<Number>,
     /// The Tariff Elements. Cardinality `+`.
@@ -125,9 +133,11 @@ impl Validate for Tariff {
     fn validate_in(&self, v: &mut Validator) {
         validate_fields!(
             self, v, country_code, party_id, id, currency, tariff_type as "type", tariff_alt_text,
-            tariff_alt_url, min_price, max_price, preauthorize_amount, elements, tax_included,
-            start_date_time, end_date_time, energy_mix, last_updated,
+            tariff_alt_url, min_price, max_price, elements, tax_included, start_date_time,
+            end_date_time, energy_mix, last_updated,
         );
+        #[cfg(feature = "payments")]
+        validate_fields!(self, v, preauthorize_amount);
         if self.elements.is_empty() {
             v.report_at(
                 "elements",
@@ -450,6 +460,8 @@ impl Validate for TariffRestrictions {
             day_of_week,
             reservation,
         );
+        #[cfg(feature = "bookings")]
+        validate_fields!(self, v, booking);
         // A wrap-around window is legal for times, but not for dates or magnitudes.
         for (lo_name, lo, hi_name, hi) in [
             ("min_kwh", self.min_kwh, "max_kwh", self.max_kwh),
@@ -632,7 +644,7 @@ impl TariffDimensionType {
     }
 }
 
-ocpi_enum! {
+ocpi_lenient_enum! {
     /// The kind of session a Tariff applies to.
     ///
     /// Spec: 2.3.0 §mod_tariffs_tariff_type

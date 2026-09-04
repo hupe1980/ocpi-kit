@@ -268,6 +268,7 @@ impl Validate for Evse {
             v,
             uid,
             evse_id,
+            status,
             status_schedule,
             capabilities,
             connectors,

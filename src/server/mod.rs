@@ -66,6 +66,9 @@ pub use router::{CallbackUrls, OcpiRouter, OcpiState, ServerConfig};
 pub use traits::{
     CdrsReceiver, CdrsSender, ChargingProfilesReceiver, ChargingProfilesSender, CommandsReceiver,
     CommandsSender, Created, CredentialsHandler, Handled, HubClientInfoReceiver, HubClientInfoSender,
-    LocationsReceiver, LocationsSender, PaymentsReceiver, PaymentsSender, SessionsReceiver, SessionsSender,
-    TariffsReceiver, TariffsSender, TokensReceiver, TokensSender,
+    LocationsReceiver, LocationsSender, SessionsReceiver, SessionsSender, TariffsReceiver, TariffsSender,
+    TokensReceiver, TokensSender,
 };
+#[cfg(feature = "payments")]
+#[cfg_attr(docsrs, doc(cfg(feature = "payments")))]
+pub use traits::{PaymentsReceiver, PaymentsSender};

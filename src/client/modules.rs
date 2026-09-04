@@ -1067,7 +1067,8 @@ impl<'a> HubClientInfoClient<'a> {
         party: &PartyRef,
     ) -> Result<crate::v2_3_0::hub_client_info::ClientInfo, OcpiError> {
         let endpoint = self.0.receiver_endpoint().ok_or_else(|| self.0.missing(InterfaceRole::Receiver))?;
-        let url = endpoint.base().join(party.country_code.as_str()).join(party.party_id.as_str());
+        let url =
+            endpoint.base().join_segment(party.country_code.as_str()).join_segment(party.party_id.as_str());
         self.0.get_bridged(url, ObjectKind::ClientInfo).await
     }
 
@@ -1081,7 +1082,8 @@ impl<'a> HubClientInfoClient<'a> {
         info: &crate::v2_3_0::hub_client_info::ClientInfo,
     ) -> Result<(), OcpiError> {
         let endpoint = self.0.receiver_endpoint().ok_or_else(|| self.0.missing(InterfaceRole::Receiver))?;
-        let url = endpoint.base().join(info.country_code.as_str()).join(info.party_id.as_str());
+        let url =
+            endpoint.base().join_segment(info.country_code.as_str()).join_segment(info.party_id.as_str());
         self.0.put_bridged(url, info, ObjectKind::ClientInfo).await
     }
 }
@@ -1093,10 +1095,13 @@ impl<'a> HubClientInfoClient<'a> {
 /// [`SenderEndpoint::payments_terminals`](crate::transport::SenderEndpoint::payments_terminals)
 /// for how the module's two endpoint URLs are resolved from one discovered `payments` endpoint.
 ///
-/// Spec: 2.3.0 §mod_payments_payments_module
+/// Spec: 2.3.0 payments branch §mod_payments_payments_module
+#[cfg(feature = "payments")]
+#[cfg_attr(docsrs, doc(cfg(feature = "payments")))]
 #[derive(Clone, Debug)]
 pub struct PaymentsClient<'a>(ModuleClient<'a>);
 
+#[cfg(feature = "payments")]
 impl<'a> PaymentsClient<'a> {
     /// Wraps a module client.
     #[must_use]
@@ -1375,6 +1380,8 @@ impl Peer {
     }
 
     /// The Payments client.
+    #[cfg(feature = "payments")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "payments")))]
     #[must_use]
     pub fn payments<'a>(&'a self, transport: &'a Transport, from: PartyRef) -> PaymentsClient<'a> {
         PaymentsClient::new(self.module(transport, ModuleId::Payments, from))

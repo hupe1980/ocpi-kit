@@ -7,13 +7,13 @@
 use bon::Builder;
 use serde::{Deserialize, Serialize};
 
-use crate::ocpi_enum;
 use crate::ocpi_open_enum;
 use crate::types::validate_fields;
 use crate::types::{
     CiString, ContractId, CountryCode, DateTime, DisplayText, Extensions, OcpiString, PartyId, PartyRef,
     Validate, Validator, ViolationCode,
 };
+use crate::{ocpi_enum, ocpi_lenient_enum};
 
 use super::sessions::ProfileType;
 
@@ -140,7 +140,11 @@ impl Token {
                 }
             }
             // "Whitelisting is forbidden, only realtime authorization is allowed."
-            WhitelistType::Never => {
+            //
+            // A `whitelist` value this version does not define lands here too: it is reported by
+            // `Validate`, and until somebody acts on that report the safe reading is the
+            // strictest one the enum offers — ask the eMSP, and deny when it cannot be asked.
+            WhitelistType::Never | WhitelistType::Custom(_) => {
                 if online {
                     AuthorizationDecision::AuthorizeRealtime
                 } else {
@@ -312,7 +316,7 @@ ocpi_open_enum! {
     }
 }
 
-ocpi_enum! {
+ocpi_lenient_enum! {
     /// When authorization of a Token by the CPO is allowed without asking the eMSP.
     ///
     /// Spec: 2.3.0 §mod_tokens_whitelisttype_enum

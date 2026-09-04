@@ -50,8 +50,9 @@ const BRANCH_ONLY_FIELDS: &[(&str, &str, &str)] = &[
     // Added by the `bookings` branch to objects the core release also defines.
     ("2.3.0 bookings branch", "CDR", "booking_id"),
     ("2.3.0 bookings branch", "TariffRestrictions", "booking"),
-    // Added by the core release after the `bookings` branch forked.
-    ("2.3.0", "Tariff", "preauthorize_amount"),
+    // Added by the `payments` branch to a core object: the amount a Payment Terminal Provider
+    // preauthorizes is a Payments concept, and lives with the module rather than in core.
+    ("2.3.0 payments branch", "Tariff", "preauthorize_amount"),
 ];
 
 /// Compares the crate with the specification and prints a report.

@@ -90,6 +90,7 @@ impl Validate for Session {
             end_date_time as "end_datetime",
             kwh, auth_id, auth_method, location, meter_id, currency, charging_periods, status,
             last_updated,
+            total_cost,
         );
         if self.end_date_time.is_some_and(|end| end < self.start_date_time) {
             v.report_at("end_datetime", ViolationCode::Inconsistent, "a session cannot end before it starts");

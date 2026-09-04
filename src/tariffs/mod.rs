@@ -11,7 +11,7 @@
 //! quantity was billed for each dimension, what `step_size` did to it, which Tariff Element and
 //! which Price Component priced it, and why that element was selected.
 //!
-//! **The arithmetic is exact.** Every value is a [`Number`](crate::types::Number), a decimal.
+//! **The arithmetic is exact.** Every value is a [`Number`], a decimal.
 //! There is no `f64` anywhere in this module.
 //!
 //! **The undefined parts are parameters.** The specification says nothing about rounding, on
@@ -49,19 +49,23 @@
 mod breakdown;
 mod engine;
 mod input;
+mod lint;
 mod policy;
+mod verify;
 
 pub use breakdown::{
     AppliedComponent, CostBreakdown, DimensionCost, PriceLimitApplied, PricedSegment, PricingNote,
-    PricingNoteCode, TaxLine,
+    PricingNoteCode, TaxBasis, TaxLine,
 };
 pub use engine::PricingEngine;
 pub use input::{PricedPeriod, PricedSession};
+pub use lint::{TariffLint, TariffLintCode, lint};
 pub use policy::{PricingPolicy, Quantisation};
+pub use verify::{CdrVerification, Discrepancy, Divergence, verify_cdr, verify_cdr_within};
 
 use core::fmt;
 
-use crate::types::{DateTime, LocalParts};
+use crate::types::{DateTime, LocalParts, Number};
 
 /// The IANA time zone a Location is in, which the local-time restrictions are expressed in.
 ///
@@ -123,7 +127,9 @@ impl TimeZone {
     ///
     /// Returns [`PricingError::TimeZone`] when the offset cannot be determined.
     pub fn to_local(&self, instant: DateTime) -> Result<LocalParts, PricingError> {
-        Ok(instant.local_parts(self.offset_seconds_at(instant)?))
+        instant
+            .local_parts(self.offset_seconds_at(instant)?)
+            .map_err(|e| PricingError::TimeZone(format!("{}: {e}", self.name)))
     }
 }
 
@@ -155,6 +161,23 @@ pub enum PricingError {
     /// The Location's time zone could not be resolved.
     #[error("time zone: {0}")]
     TimeZone(String),
+    /// An input value is too large to price with, so the arithmetic would overflow.
+    ///
+    /// Every quantity and price this engine works on is peer-supplied: a CDR arrives from a CPO
+    /// and is priced by an eMSP that did not write it. A `price` of 10^27 is not a tariff, it is
+    /// an input that would make an exact-decimal multiplication overflow — and overflow in
+    /// `rust_decimal` is a **panic**, which inside a hub or a reconciliation run takes down work
+    /// that has nothing to do with this CDR. So the bound is checked before any arithmetic
+    /// happens, and named.
+    #[error("{what} is {value}, which is beyond the {limit} this engine will price")]
+    OutOfRange {
+        /// Which value was out of range.
+        what: String,
+        /// The value itself.
+        value: Number,
+        /// The bound it exceeded.
+        limit: Number,
+    },
 }
 
 #[cfg(test)]
@@ -806,6 +829,508 @@ mod tests {
         let b = PricingEngine::new().price(&session, &[t]).unwrap();
         assert_eq!(b.total_excl_vat, n("6.75"));
         assert_eq!(b.total_incl_vat, n("7.60"));
+    }
+
+    /// The specification's own North American examples, both halves.
+    ///
+    /// > *"This example Tariff … charges two currency units per hour of charging … For a charging
+    /// > session of 2.5 hours, this tariff will result in costs of C$ 5.00, plus taxes according
+    /// > to locally applicable legislation."*
+    ///
+    /// > *"C$ 2.10 per hour, taxes included … For a charging session of 2.5 hours, this tariff
+    /// > will result in costs of C$ 5.25. All taxes that are due are included in that C$5.25
+    /// > amount."*
+    #[test]
+    fn spec_example_north_american_tariffs_state_gross_or_net_and_are_read_accordingly() {
+        let session = || {
+            PricedSession::new(dt("2024-01-15T10:00:00Z"), TimeZone::utc())
+                .with_period(PricedPeriod {
+                    charging_hours: n("2.5"),
+                    ..PricedPeriod::new(dt("2024-01-15T10:00:00Z"))
+                })
+                .ending(dt("2024-01-15T12:30:00Z"))
+        };
+        let component = |price: &str| PriceComponent {
+            component_type: TariffDimensionType::Time,
+            price: n(price),
+            vat: None,
+            step_size: 1,
+            extensions: crate::types::Extensions::new(),
+        };
+
+        // tariff_19: taxes are added on top, and the CPO does not know the rate.
+        let mut excl = tariff(vec![element(vec![component("2.00")])]);
+        excl.tax_included = TaxIncluded::No;
+        let b = PricingEngine::new().price(&session(), &[excl]).unwrap();
+        assert_eq!(b.total_excl_vat, n("5.00"));
+        assert_eq!(b.total_incl_vat, n("5.00"), "no rate is named, so no tax is added");
+        assert_eq!(b.tax_basis, TaxBasis::Excluded);
+        assert!(b.notes.is_empty(), "nothing about this session is unclear");
+
+        // tariff_20: the same session, priced tax-inclusive.
+        let mut incl = tariff(vec![element(vec![component("2.10")])]);
+        incl.tax_included = TaxIncluded::Yes;
+        let b = PricingEngine::new().price(&session(), &[incl]).unwrap();
+        assert_eq!(b.total_incl_vat, n("5.25"), "all taxes due are inside this amount");
+        assert_eq!(b.tax_basis, TaxBasis::Included);
+        assert_eq!(
+            b.notes_with(PricingNoteCode::TaxIncludedWithoutRate).count(),
+            1,
+            "the split is not derivable, and saying so once is the whole point",
+        );
+    }
+
+    /// A tax-inclusive tariff that *does* name a rate is split, not taxed twice.
+    ///
+    /// This is the case an engine that ignores `tax_included` gets wrong by exactly the tax: it
+    /// reads C$ 2.20 as a net amount and bills C$ 2.42.
+    #[test]
+    fn a_tax_inclusive_price_that_names_a_rate_is_split_rather_than_taxed_again() {
+        let mut t = tariff(vec![element(vec![component(TariffDimensionType::Time, "2.20", Some("10"), 1)])]);
+        t.tax_included = TaxIncluded::Yes;
+        let session = PricedSession::new(dt("2024-01-15T10:00:00Z"), TimeZone::utc())
+            .with_period(PricedPeriod {
+                charging_hours: n("1"),
+                ..PricedPeriod::new(dt("2024-01-15T10:00:00Z"))
+            })
+            .ending(dt("2024-01-15T11:00:00Z"));
+
+        let b = PricingEngine::new().price(&session, &[t]).unwrap();
+        assert_eq!(b.total_incl_vat, n("2.20"), "the driver pays what the tariff says");
+        assert_eq!(b.total_excl_vat, n("2.00"), "2.20 ÷ 1.10");
+        assert_eq!(b.total_vat(), n("0.20"));
+        assert_taxes_add_up(&b);
+        assert!(b.notes.is_empty());
+    }
+
+    #[test]
+    fn a_tariff_that_says_no_tax_applies_ignores_a_rate_and_says_so() {
+        let mut t =
+            tariff(vec![element(vec![component(TariffDimensionType::Energy, "0.25", Some("21"), 1)])]);
+        t.tax_included = TaxIncluded::NotApplicable;
+        let session =
+            PricedSession::new(dt("2024-01-15T10:00:00Z"), TimeZone::utc()).with_period(PricedPeriod {
+                energy_kwh: n("20"),
+                ..PricedPeriod::new(dt("2024-01-15T10:00:00Z"))
+            });
+
+        let b = PricingEngine::new().price(&session, &[t]).unwrap();
+        assert_eq!(b.total_excl_vat, n("5.00"));
+        assert_eq!(b.total_incl_vat, n("5.00"));
+        assert_eq!(b.tax_basis, TaxBasis::NotApplicable);
+        assert_eq!(b.notes_with(PricingNoteCode::TaxRateIgnored).count(), 1);
+        assert!(b.taxes.is_empty(), "no tax applies, so there is no tax line to publish");
+    }
+
+    #[test]
+    fn periods_priced_by_tariffs_that_disagree_about_tax_are_flagged() {
+        let mut net =
+            tariff(vec![element(vec![component(TariffDimensionType::Time, "2.00", Some("10"), 1)])]);
+        net.id = crate::types::CiString::new("NET").unwrap();
+        let mut gross =
+            tariff(vec![element(vec![component(TariffDimensionType::Energy, "0.22", Some("10"), 1)])]);
+        gross.id = crate::types::CiString::new("GROSS").unwrap();
+        gross.tax_included = TaxIncluded::Yes;
+
+        let session = PricedSession::new(dt("2024-01-15T10:00:00Z"), TimeZone::utc())
+            .with_period(PricedPeriod {
+                charging_hours: n("1"),
+                tariff_id: Some("NET".to_owned()),
+                ..PricedPeriod::new(dt("2024-01-15T10:00:00Z"))
+            })
+            .with_period(PricedPeriod {
+                energy_kwh: n("10"),
+                tariff_id: Some("GROSS".to_owned()),
+                ..PricedPeriod::new(dt("2024-01-15T11:00:00Z"))
+            })
+            .ending(dt("2024-01-15T12:00:00Z"));
+
+        let b = PricingEngine::new().price(&session, &[net, gross]).unwrap();
+        assert_eq!(b.tax_basis, TaxBasis::Mixed);
+        assert_eq!(b.notes_with(PricingNoteCode::MixedTaxBasis).count(), 1);
+        // 1 h at 2.00 net = 2.00 + 0.20 tax; 10 kWh at 0.22 gross = 2.20, of which 0.20 is tax.
+        assert_eq!(b.total_excl_vat, n("4.00"));
+        assert_eq!(b.total_incl_vat, n("4.40"));
+        assert_taxes_add_up(&b);
+    }
+
+    /// A reservation nothing prices is free, not billed at the charging rate.
+    ///
+    /// > *"When this field is present, the TariffElement describes reservation costs."*
+    ///
+    /// So an element that does not carry the restriction — including an unrestricted fallback —
+    /// is not about reservations, and reserved time it does not price costs nothing, with a note.
+    /// A session that is nothing but a reservation still pays the reservation's flat fee.
+    ///
+    /// > *"Reservation € 2.00 start fee, € 5.00 per hour"* — the fee lives on the element that
+    /// > carries the `reservation` restriction, and a session that never charges has no other
+    /// > element to find it on.
+    #[test]
+    fn a_reservation_only_session_pays_the_flat_fee_on_its_reservation_element() {
+        let t = tariff(vec![
+            restricted(
+                vec![
+                    component(TariffDimensionType::Flat, "2.00", None, 0),
+                    component(TariffDimensionType::Time, "5.00", None, 60),
+                ],
+                TariffRestrictions {
+                    reservation: Some(crate::v2_3_0::tariffs::ReservationRestrictionType::Reservation),
+                    ..Default::default()
+                },
+            ),
+            element(vec![component(TariffDimensionType::Energy, "0.25", None, 1)]),
+        ]);
+        let session =
+            PricedSession::new(dt("2024-01-15T09:45:00Z"), TimeZone::utc()).with_period(PricedPeriod {
+                reservation_hours: minutes(30),
+                ..PricedPeriod::new(dt("2024-01-15T09:45:00Z"))
+            });
+
+        let b = PricingEngine::new().price(&session, &[t]).unwrap();
+        // 2.00 flat + half an hour at 5.00/h.
+        assert_eq!(b.total_excl_vat, n("4.50"));
+        assert_eq!(b.dimension_total(TariffDimensionType::Flat), n("2.00"));
+    }
+
+    #[test]
+    fn reserved_time_is_not_priced_by_an_element_that_says_nothing_about_reservations() {
+        let t = tariff(vec![element(vec![component(TariffDimensionType::Time, "1.00", None, 1)])]);
+        let session =
+            PricedSession::new(dt("2024-01-15T10:00:00Z"), TimeZone::utc()).with_period(PricedPeriod {
+                charging_hours: n("1"),
+                reservation_hours: n("2"),
+                ..PricedPeriod::new(dt("2024-01-15T10:00:00Z"))
+            });
+
+        let b = PricingEngine::new().price(&session, &[t]).unwrap();
+        assert_eq!(b.total_excl_vat, n("1.00"), "only the charging hour is priced");
+        assert_eq!(b.notes_with(PricingNoteCode::NoPriceComponent).count(), 1);
+    }
+
+    /// A quantity that is a repeating decimal must not be pushed into the next `step_size` block.
+    ///
+    /// 35 minutes is 0.58333…33 hours, and 0.58333…33 × 3600 is 2099.999…, which a bare ceiling
+    /// rounds up to a 36th minute — an extra block the driver did not use.
+    #[test]
+    fn a_repeating_decimal_quantity_is_not_rounded_into_an_extra_block() {
+        let t = tariff(vec![element(vec![component(TariffDimensionType::Time, "60.00", None, 60)])]);
+        let session = PricedSession::new(dt("2024-01-15T10:00:00Z"), TimeZone::utc())
+            .with_period(PricedPeriod {
+                charging_hours: minutes(35),
+                ..PricedPeriod::new(dt("2024-01-15T10:00:00Z"))
+            })
+            .ending(dt("2024-01-15T10:35:00Z"));
+
+        let b = PricingEngine::new().price(&session, &[t]).unwrap();
+        // 35 minutes at 60.00 per hour is exactly 35.00, not 36.00.
+        assert_eq!(b.total_excl_vat, n("35.00"));
+    }
+
+    #[test]
+    fn a_price_no_arithmetic_can_hold_is_refused_rather_than_panicking() {
+        let t = tariff(vec![element(vec![component(
+            TariffDimensionType::Energy,
+            "10000000000000000000000000",
+            None,
+            1,
+        )])]);
+        let session =
+            PricedSession::new(dt("2024-01-15T10:00:00Z"), TimeZone::utc()).with_period(PricedPeriod {
+                energy_kwh: n("20"),
+                ..PricedPeriod::new(dt("2024-01-15T10:00:00Z"))
+            });
+
+        let error = PricingEngine::new().price(&session, &[t]).unwrap_err();
+        assert!(matches!(error, PricingError::OutOfRange { .. }), "{error}");
+        assert!(error.to_string().contains("element 0 component 0"), "{error}");
+    }
+
+    /// The boundaries the specification spells out as inclusive or exclusive, one test each.
+    ///
+    /// Every one of these is a `<` that could be a `<=` without any example-based test noticing:
+    /// a session that consumes *exactly* `max_kwh` or lasts *exactly* `max_duration` is the only
+    /// input that tells the two apart, and it is the input two implementations disagree about.
+    mod boundaries {
+        use super::*;
+
+        fn at(energy: &str, restriction: TariffRestrictions) -> Number {
+            // 0.25/kWh under the restriction, nothing otherwise: the total says whether the
+            // restricted element matched.
+            let t = tariff(vec![restricted(
+                vec![component(TariffDimensionType::Energy, "0.25", None, 1)],
+                restriction,
+            )]);
+            let session = PricedSession::new(dt("2024-01-15T10:00:00Z"), TimeZone::utc())
+                .with_period(PricedPeriod {
+                    energy_kwh: n(energy),
+                    ..PricedPeriod::new(dt("2024-01-15T10:00:00Z"))
+                })
+                .with_period(PricedPeriod {
+                    energy_kwh: n("1"),
+                    ..PricedPeriod::new(dt("2024-01-15T11:00:00Z"))
+                })
+                .ending(dt("2024-01-15T12:00:00Z"));
+            PricingEngine::new().price(&session, &[t]).unwrap().total_excl_vat
+        }
+
+        /// > *`min_kwh`: valid from this amount of energy (**inclusive**) being used.*
+        #[test]
+        fn min_kwh_is_inclusive() {
+            let restriction = |min: &str| TariffRestrictions { min_kwh: Some(n(min)), ..Default::default() };
+            // The second period starts with exactly 10 kWh already used.
+            assert_eq!(at("10", restriction("10")), n("0.25"), "10 kWh is 'from 10 inclusive'");
+            assert_eq!(at("10", restriction("10.0001")), Number::ZERO, "and 10.0001 is not");
+        }
+
+        /// > *`max_kwh`: valid until this amount of energy (**exclusive**) being used.*
+        ///
+        /// The first period is priced either way — nothing had been used when it began — so the
+        /// discriminator is the second, which starts with exactly `max_kwh` already used: 11 kWh
+        /// billed against 10.
+        #[test]
+        fn max_kwh_is_exclusive() {
+            let restriction = |max: &str| TariffRestrictions { max_kwh: Some(n(max)), ..Default::default() };
+            assert_eq!(at("10", restriction("10")), n("2.50"), "at exactly 10 kWh used it is over");
+            assert_eq!(at("10", restriction("10.0001")), n("2.75"), "just below it, it still applies");
+        }
+
+        fn after(seconds: i64, restriction: TariffRestrictions) -> Number {
+            let t = tariff(vec![restricted(
+                vec![component(TariffDimensionType::Energy, "0.25", None, 1)],
+                restriction,
+            )]);
+            let start = dt("2024-01-15T10:00:00Z");
+            let later = DateTime::from_unix_timestamp(start.unix_timestamp() + seconds).unwrap();
+            let session = PricedSession::new(start, TimeZone::utc())
+                .with_period(PricedPeriod::new(start))
+                .with_period(PricedPeriod { energy_kwh: n("1"), ..PricedPeriod::new(later) })
+                .ending(DateTime::from_unix_timestamp(start.unix_timestamp() + seconds + 60).unwrap());
+            PricingEngine::new().price(&session, &[t]).unwrap().total_excl_vat
+        }
+
+        /// > *`min_duration`: minimum duration in seconds the Charging Session MUST last
+        /// > (**inclusive**).*
+        #[test]
+        fn min_duration_is_inclusive() {
+            let restriction = |min: u64| TariffRestrictions { min_duration: Some(min), ..Default::default() };
+            assert_eq!(after(1800, restriction(1800)), n("0.25"), "exactly 30 minutes in");
+            assert_eq!(after(1800, restriction(1801)), Number::ZERO, "one second short");
+        }
+
+        /// > *`max_duration`: maximum duration in seconds the Charging Session MUST last
+        /// > (**exclusive**).*
+        #[test]
+        fn max_duration_is_exclusive() {
+            let restriction = |max: u64| TariffRestrictions { max_duration: Some(max), ..Default::default() };
+            assert_eq!(after(1800, restriction(1800)), Number::ZERO, "at exactly 30 minutes it is over");
+            assert_eq!(after(1800, restriction(1801)), n("0.25"), "one second before, it applies");
+        }
+
+        fn drawing(power: &str, restriction: TariffRestrictions) -> Number {
+            let t = tariff(vec![restricted(
+                vec![component(TariffDimensionType::Energy, "0.25", None, 1)],
+                restriction,
+            )]);
+            let session =
+                PricedSession::new(dt("2024-01-15T10:00:00Z"), TimeZone::utc()).with_period(PricedPeriod {
+                    energy_kwh: n("1"),
+                    max_power_kw: Some(n(power)),
+                    min_power_kw: Some(n(power)),
+                    max_current_a: Some(n(power)),
+                    min_current_a: Some(n(power)),
+                    ..PricedPeriod::new(dt("2024-01-15T10:00:00Z"))
+                });
+            PricingEngine::new().price(&session, &[t]).unwrap().total_excl_vat
+        }
+
+        /// > *`min_power`: when the EV is charging with **more than, or equal to**, the defined
+        /// > amount of power, this TariffElement is/becomes active.*
+        #[test]
+        fn min_power_and_min_current_are_inclusive() {
+            assert_eq!(
+                drawing("16", TariffRestrictions { min_power: Some(n("16")), ..Default::default() }),
+                n("0.25"),
+            );
+            assert_eq!(
+                drawing("16", TariffRestrictions { min_current: Some(n("16")), ..Default::default() }),
+                n("0.25"),
+            );
+            assert_eq!(
+                drawing("16", TariffRestrictions { min_power: Some(n("16.1")), ..Default::default() }),
+                Number::ZERO,
+            );
+        }
+
+        /// > *`max_power`: when the EV is charging with **less than** the defined amount of
+        /// > power, this TariffElement becomes/is active.*
+        #[test]
+        fn max_power_and_max_current_are_exclusive() {
+            assert_eq!(
+                drawing("16", TariffRestrictions { max_power: Some(n("16")), ..Default::default() }),
+                Number::ZERO,
+                "at exactly the bound it is no longer active",
+            );
+            assert_eq!(
+                drawing("16", TariffRestrictions { max_current: Some(n("16")), ..Default::default() }),
+                Number::ZERO,
+            );
+            assert_eq!(
+                drawing("16", TariffRestrictions { max_power: Some(n("16.1")), ..Default::default() }),
+                n("0.25"),
+            );
+        }
+
+        /// The after-tax half of a price limit has boundaries of its own.
+        ///
+        /// > *The total cost of a Charging Session after taxes can never be lower than the value
+        /// > of the min_price's `after_taxes` field.*
+        #[test]
+        fn an_after_tax_price_limit_is_a_bound_too() {
+            let priced = |min_after: Option<&str>, max_after: Option<&str>| {
+                let mut t = tariff(vec![element(vec![component(
+                    TariffDimensionType::Energy,
+                    "0.25",
+                    Some("10"),
+                    1,
+                )])]);
+                let limit = |after: &str| PriceLimit {
+                    before_taxes: n("0"),
+                    after_taxes: Some(n(after)),
+                    extensions: crate::types::Extensions::new(),
+                };
+                t.min_price = min_after.map(limit);
+                t.max_price = max_after.map(|m| PriceLimit {
+                    before_taxes: n("1000"),
+                    after_taxes: Some(n(m)),
+                    extensions: crate::types::Extensions::new(),
+                });
+                let session = PricedSession::new(dt("2024-01-15T10:00:00Z"), TimeZone::utc()).with_period(
+                    PricedPeriod {
+                        energy_kwh: n("20"), // 5.00 net, 5.50 gross
+                        ..PricedPeriod::new(dt("2024-01-15T10:00:00Z"))
+                    },
+                );
+                PricingEngine::new().price(&session, &[t]).unwrap()
+            };
+
+            let exact = priced(Some("5.50"), None);
+            assert_eq!(exact.total_incl_vat, n("5.50"));
+            assert_eq!(exact.limit_applied, None, "a total exactly on the after-tax minimum stands");
+            assert_eq!(priced(Some("5.51"), None).total_incl_vat, n("5.51"), "one cent above raises it");
+
+            let exact_max = priced(None, Some("5.50"));
+            assert_eq!(exact_max.limit_applied, None, "and one exactly on the after-tax maximum");
+            assert_eq!(priced(None, Some("5.49")).total_incl_vat, n("5.49"), "one cent below caps it");
+        }
+
+        /// A rate that applies to nothing is still a rate the breakdown states.
+        ///
+        /// A tariff can name a VAT percentage on a dimension that comes out at zero — a free
+        /// first half-hour, a `min_kwh` tier nobody reached. The line says "this rate applied,
+        /// and it came to nothing", which is a different statement from the rate being absent.
+        #[test]
+        fn a_tax_line_with_a_rate_survives_a_zero_amount() {
+            let t = tariff(vec![element(vec![component(TariffDimensionType::Energy, "0", Some("21"), 1)])]);
+            let session =
+                PricedSession::new(dt("2024-01-15T10:00:00Z"), TimeZone::utc()).with_period(PricedPeriod {
+                    energy_kwh: n("20"),
+                    ..PricedPeriod::new(dt("2024-01-15T10:00:00Z"))
+                });
+            let b = PricingEngine::new().price(&session, &[t]).unwrap();
+            assert_eq!(b.total_excl_vat, Number::ZERO);
+            assert_eq!(b.taxes.len(), 1, "the rate is reported: {:?}", b.taxes);
+            assert_eq!(b.taxes[0].percentage, Some(n("21")));
+            assert_eq!(b.taxes[0].amount, Number::ZERO);
+        }
+
+        /// A clamp on a session whose only rate is 0% has nothing to scale, and says so.
+        #[test]
+        fn a_clamp_over_a_zero_rate_reports_the_tax_it_cannot_attribute() {
+            let mut t =
+                tariff(vec![element(vec![component(TariffDimensionType::Energy, "0.25", Some("0"), 1)])]);
+            t.min_price = Some(PriceLimit {
+                before_taxes: n("10"),
+                after_taxes: Some(n("12")),
+                extensions: crate::types::Extensions::new(),
+            });
+            let session =
+                PricedSession::new(dt("2024-01-15T10:00:00Z"), TimeZone::utc()).with_period(PricedPeriod {
+                    energy_kwh: n("20"), // 5.00, with 0% VAT
+                    ..PricedPeriod::new(dt("2024-01-15T10:00:00Z"))
+                });
+
+            let b = PricingEngine::new().price(&session, &[t]).unwrap();
+            assert_eq!(b.total_excl_vat, n("10"));
+            assert_eq!(b.total_incl_vat, n("12"));
+            assert_taxes_add_up(&b);
+            assert_eq!(b.notes_with(PricingNoteCode::UnattributedTax).count(), 1);
+        }
+
+        /// A price limit moves a total that is past it, and leaves one that is exactly on it.
+        #[test]
+        fn a_price_limit_is_a_bound_not_a_target() {
+            let priced = |min: Option<&str>, max: Option<&str>| {
+                let mut t =
+                    tariff(vec![element(vec![component(TariffDimensionType::Energy, "0.25", None, 1)])]);
+                t.min_price = min.map(|m| PriceLimit {
+                    before_taxes: n(m),
+                    after_taxes: None,
+                    extensions: crate::types::Extensions::new(),
+                });
+                t.max_price = max.map(|m| PriceLimit {
+                    before_taxes: n(m),
+                    after_taxes: None,
+                    extensions: crate::types::Extensions::new(),
+                });
+                let session = PricedSession::new(dt("2024-01-15T10:00:00Z"), TimeZone::utc()).with_period(
+                    PricedPeriod {
+                        energy_kwh: n("20"), // 5.00
+                        ..PricedPeriod::new(dt("2024-01-15T10:00:00Z"))
+                    },
+                );
+                PricingEngine::new().price(&session, &[t]).unwrap()
+            };
+
+            let exact = priced(Some("5.00"), None);
+            assert_eq!(exact.total_excl_vat, n("5.00"));
+            assert_eq!(exact.limit_applied, None, "a total exactly on the minimum was not moved");
+
+            let raised = priced(Some("5.01"), None);
+            assert_eq!(raised.total_excl_vat, n("5.01"));
+            assert_eq!(raised.limit_applied, Some(PriceLimitApplied::Minimum));
+
+            let exact_max = priced(None, Some("5.00"));
+            assert_eq!(exact_max.limit_applied, None, "nor was one exactly on the maximum");
+
+            let capped = priced(None, Some("4.99"));
+            assert_eq!(capped.total_excl_vat, n("4.99"));
+            assert_eq!(capped.limit_applied, Some(PriceLimitApplied::Maximum));
+        }
+
+        /// The note codes are the machine-readable half of a breakdown, so their spelling is API.
+        #[test]
+        fn every_note_code_has_a_stable_slug() {
+            use PricingNoteCode as C;
+            for (code, slug) in [
+                (C::NoPriceComponent, "no_price_component"),
+                (C::PeriodsOutOfOrder, "periods_out_of_order"),
+                (C::PeriodSpansPriceChange, "period_spans_price_change"),
+                (C::TotalClamped, "total_clamped"),
+                (C::NegativeTax, "negative_tax"),
+                (C::UnattributedTax, "unattributed_tax"),
+                (C::TaxIncludedWithoutRate, "tax_included_without_rate"),
+                (C::TaxRateIgnored, "tax_rate_ignored"),
+                (C::MixedTaxBasis, "mixed_tax_basis"),
+            ] {
+                assert_eq!(code.as_str(), slug);
+                assert_eq!(code.to_string(), slug);
+                assert_eq!(
+                    serde_json::to_string(&code).unwrap(),
+                    format!("\"{slug}\""),
+                    "the code is serialised into breakdowns a pipeline counts",
+                );
+            }
+        }
     }
 
     #[test]

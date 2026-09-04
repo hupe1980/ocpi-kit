@@ -79,7 +79,13 @@ impl Url {
         url::Url::parse(&self.0).map_err(|e| InvalidUrl(format!("{:?}: {e}", self.0)))
     }
 
-    /// This URL with a path segment appended, keeping exactly one `/` between the two.
+    /// This URL with an **already-encoded path** appended, keeping exactly one `/` between the
+    /// two.
+    ///
+    /// The argument is written into the URL verbatim, so it may contain `/` and carry several
+    /// segments. That is what a hub needs — it holds the path an incoming request arrived with,
+    /// already encoded by the party that sent it — and it is the wrong tool for an object id.
+    /// Use [`join_segment`](Self::join_segment) for anything that came out of a JSON document.
     ///
     /// Endpoint URLs discovered from a peer sometimes carry a trailing slash and sometimes do
     /// not; this joins correctly either way and never emits a double slash or a trailing one.
@@ -91,16 +97,44 @@ impl Url {
     ///            "https://example.com/ocpi/cpo/2.3.0/locations/NL/TNM");
     /// ```
     #[must_use]
-    pub fn join(&self, segment: &str) -> Self {
+    pub fn join(&self, path: &str) -> Self {
         let base = self.0.trim_end_matches('/');
-        let segment = segment.trim_start_matches('/').trim_end_matches('/');
-        if segment.is_empty() {
+        let path = path.trim_start_matches('/').trim_end_matches('/');
+        if path.is_empty() {
             return Self(base.to_owned());
         }
-        Self(format!("{base}/{segment}"))
+        Self(format!("{base}/{path}"))
     }
 
-    /// This URL with a query string appended, using `?` or `&` as appropriate.
+    /// This URL with **one path segment** appended, percent-encoded.
+    ///
+    /// An OCPI identifier is a `CiString(36)`, and the specification puts no restriction on which
+    /// characters it may contain. Interpolating one into a URL verbatim therefore lets the *value*
+    /// change the URL's structure: a `token_uid` of `../credentials` addresses a different
+    /// endpoint, and one containing `?` starts a query string. Both are reachable from data a peer
+    /// sent, so every id this crate puts in a path goes through here.
+    ///
+    /// The encoding is RFC 3986 `pchar`: unreserved characters, sub-delims and `:`/`@` are left
+    /// alone — which keeps the `*` of `BE*BEC*E041503001` readable — and everything else,
+    /// including `/`, `?`, `#`, `%`, space and every non-ASCII byte, is percent-encoded.
+    ///
+    /// ```
+    /// use ocpi_kit::types::Url;
+    /// let base = Url::new("https://example.com/ocpi/cpo/2.3.0/tokens").unwrap();
+    /// assert_eq!(base.join_segment("BE*BEC*E041503001").as_str(),
+    ///            "https://example.com/ocpi/cpo/2.3.0/tokens/BE*BEC*E041503001");
+    /// assert_eq!(base.join_segment("../credentials").as_str(),
+    ///            "https://example.com/ocpi/cpo/2.3.0/tokens/..%2Fcredentials");
+    /// ```
+    #[must_use]
+    pub fn join_segment(&self, segment: &str) -> Self {
+        self.join(&encode_path_segment(segment))
+    }
+
+    /// This URL with a query string appended verbatim, using `?` or `&` as appropriate.
+    ///
+    /// The argument is not encoded; build it with [`with_param`](Self::with_param) or
+    /// [`encode_query_component`] unless it is already a query string.
     #[must_use]
     pub fn with_query(&self, query: &str) -> Self {
         if query.is_empty() {
@@ -108,6 +142,19 @@ impl Url {
         }
         let sep = if self.0.contains('?') { '&' } else { '?' };
         Self(format!("{}{sep}{query}", self.0))
+    }
+
+    /// This URL with one `name=value` query parameter appended, with the value percent-encoded.
+    ///
+    /// ```
+    /// use ocpi_kit::types::Url;
+    /// let url = Url::new("https://example.com/ocpi/cpo/2.3.0/tokens/012").unwrap();
+    /// assert_eq!(url.with_param("type", "APP_USER").as_str(),
+    ///            "https://example.com/ocpi/cpo/2.3.0/tokens/012?type=APP_USER");
+    /// ```
+    #[must_use]
+    pub fn with_param(&self, name: &str, value: &str) -> Self {
+        self.with_query(&format!("{name}={}", encode_query_component(value)))
     }
 
     /// Whether this URL is acceptable under `policy`.
@@ -118,6 +165,43 @@ impl Url {
     pub fn check(&self, policy: &UrlPolicy) -> Result<(), UrlRefused> {
         policy.check(self)
     }
+}
+
+/// Percent-encodes one URL **path segment**.
+///
+/// Everything outside RFC 3986 `pchar` — unreserved, sub-delims, `:` and `@` — is encoded, so the
+/// value cannot introduce a segment boundary, a query, a fragment or a stray `%`.
+#[must_use]
+pub fn encode_path_segment(value: &str) -> String {
+    encode(value, |byte| {
+        matches!(byte,
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
+            | b'-' | b'.' | b'_' | b'~'
+            | b'!' | b'$' | b'&' | b'\'' | b'(' | b')' | b'*' | b'+' | b',' | b';' | b'='
+            | b':' | b'@')
+    })
+}
+
+/// Percent-encodes one query-parameter name or value.
+///
+/// Stricter than [`encode_path_segment`]: only unreserved characters survive, so a value carrying
+/// `&`, `=` or `+` cannot become a second parameter or a space.
+#[must_use]
+pub fn encode_query_component(value: &str) -> String {
+    encode(value, |byte| matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~'))
+}
+
+fn encode(value: &str, keep: impl Fn(u8) -> bool) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if keep(byte) {
+            out.push(byte as char);
+        } else {
+            use core::fmt::Write as _;
+            let _ = write!(out, "%{byte:02X}");
+        }
+    }
+    out
 }
 
 impl Validate for Url {
@@ -403,6 +487,36 @@ fn embedded_v4(v6: &std::net::Ipv6Addr) -> std::net::Ipv4Addr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_identifier_cannot_change_the_shape_of_a_url() {
+        let base = Url::new("https://e.com/ocpi/cpo/2.3.0/tokens").unwrap();
+        // OCPI ids are CiString(36) with no character restriction, and a Token uid arrives from
+        // a peer. Interpolated verbatim, these would address a different endpoint.
+        assert_eq!(
+            base.join_segment("../credentials").as_str(),
+            "https://e.com/ocpi/cpo/2.3.0/tokens/..%2Fcredentials"
+        );
+        assert_eq!(
+            base.join_segment("012?limit=1").as_str(),
+            "https://e.com/ocpi/cpo/2.3.0/tokens/012%3Flimit=1"
+        );
+        assert_eq!(base.join_segment("a#b").as_str(), "https://e.com/ocpi/cpo/2.3.0/tokens/a%23b");
+        assert_eq!(base.join_segment("100%").as_str(), "https://e.com/ocpi/cpo/2.3.0/tokens/100%25");
+        // And the shapes real identifiers actually have survive unencoded.
+        for id in ["BE*BEC*E041503001", "3256", "LOC1", "NL-TNM-C12345678-X", "a.b~c_d"] {
+            assert_eq!(base.join_segment(id).as_str(), format!("https://e.com/ocpi/cpo/2.3.0/tokens/{id}"));
+        }
+    }
+
+    #[test]
+    fn a_query_value_cannot_add_a_parameter() {
+        let url = Url::new("https://e.com/ocpi/cpo/2.3.0/tokens/012").unwrap();
+        assert_eq!(
+            url.with_param("type", "RFID&offset=9").as_str(),
+            "https://e.com/ocpi/cpo/2.3.0/tokens/012?type=RFID%26offset%3D9"
+        );
+    }
 
     #[test]
     fn text_is_preserved_exactly() {

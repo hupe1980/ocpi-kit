@@ -47,7 +47,7 @@ impl SenderEndpoint {
     /// `GET {base}/{id}` — one object.
     #[must_use]
     pub fn object(&self, id: &str) -> Url {
-        self.base.join(id)
+        self.base.join_segment(id)
     }
 
     /// `GET {locations}/{location_id}[/{evse_uid}[/{connector_id}]]`.
@@ -55,11 +55,11 @@ impl SenderEndpoint {
     /// Spec: 2.3.0 §mod_locations_get_object_request_parameters
     #[must_use]
     pub fn location(&self, location_id: &str, evse_uid: Option<&str>, connector_id: Option<&str>) -> Url {
-        let mut url = self.base.join(location_id);
+        let mut url = self.base.join_segment(location_id);
         if let Some(evse) = evse_uid {
-            url = url.join(evse);
+            url = url.join_segment(evse);
             if let Some(connector) = connector_id {
-                url = url.join(connector);
+                url = url.join_segment(connector);
             }
         }
         url
@@ -70,9 +70,9 @@ impl SenderEndpoint {
     /// Spec: 2.3.0 §mod_tokens_real-time_authorization
     #[must_use]
     pub fn token_authorize(&self, token_uid: &str, token_type: Option<&str>) -> Url {
-        let url = self.base.join(token_uid).join("authorize");
+        let url = self.base.join_segment(token_uid).join("authorize");
         match token_type {
-            Some(t) => url.with_query(&format!("type={t}")),
+            Some(t) => url.with_param("type", t),
             None => url,
         }
     }
@@ -82,7 +82,7 @@ impl SenderEndpoint {
     /// Spec: 2.3.0 §mod_sessions_set_charging_preferences
     #[must_use]
     pub fn charging_preferences(&self, session_id: &str) -> Url {
-        self.base.join(session_id).join("charging_preferences")
+        self.base.join_segment(session_id).join("charging_preferences")
     }
 
     /// `POST {commands}/{command}` — a command request on the Receiver's Sender-side endpoint.
@@ -90,7 +90,7 @@ impl SenderEndpoint {
     /// Spec: 2.3.0 §mod_commands_commands_module
     #[must_use]
     pub fn command(&self, command: &str) -> Url {
-        self.base.join(command)
+        self.base.join_segment(command)
     }
 
     /// The Payments **terminals** sub-interface, `{payments}/terminals`.
@@ -130,13 +130,13 @@ impl SenderEndpoint {
     /// Call this on the endpoint from [`payments_terminals`](Self::payments_terminals).
     #[must_use]
     pub fn terminal(&self, terminal_id: &str) -> Url {
-        self.base.join(terminal_id)
+        self.base.join_segment(terminal_id)
     }
 
     /// `POST {payments}/terminals/{terminal_id}/deactivate`.
     #[must_use]
     pub fn terminal_deactivate(&self, terminal_id: &str) -> Url {
-        self.base.join(terminal_id).join("deactivate")
+        self.base.join_segment(terminal_id).join("deactivate")
     }
 
     /// `POST {payments}/terminals/activate`.
@@ -189,7 +189,10 @@ impl ReceiverEndpoint {
     /// `{base}/{country_code}/{party_id}/{object_id}`.
     #[must_use]
     pub fn object(&self, owner: &PartyRef, object_id: &str) -> Url {
-        self.base.join(owner.country_code.as_str()).join(owner.party_id.as_str()).join(object_id)
+        self.base
+            .join_segment(owner.country_code.as_str())
+            .join_segment(owner.party_id.as_str())
+            .join_segment(object_id)
     }
 
     /// `{locations}/{country_code}/{party_id}/{location_id}[/{evse_uid}[/{connector_id}]]`.
@@ -205,9 +208,9 @@ impl ReceiverEndpoint {
     ) -> Url {
         let mut url = self.object(owner, location_id);
         if let Some(evse) = evse_uid {
-            url = url.join(evse);
+            url = url.join_segment(evse);
             if let Some(connector) = connector_id {
-                url = url.join(connector);
+                url = url.join_segment(connector);
             }
         }
         url
@@ -220,7 +223,7 @@ impl ReceiverEndpoint {
     /// Spec: 2.3.0 §mod_charging_profiles_module
     #[must_use]
     pub fn charging_profile(&self, session_id: &str) -> Url {
-        self.base.join(session_id)
+        self.base.join_segment(session_id)
     }
 
     /// `GET {chargingprofiles}/{session_id}?duration={duration}&response_url={response_url}`.
@@ -231,18 +234,16 @@ impl ReceiverEndpoint {
         duration_seconds: u64,
         response_url: &Url,
     ) -> Url {
-        self.base.join(session_id).with_query(&format!(
-            "duration={duration_seconds}&response_url={}",
-            percent_encode(response_url.as_str())
-        ))
+        self.base
+            .join_segment(session_id)
+            .with_param("duration", &duration_seconds.to_string())
+            .with_param("response_url", response_url.as_str())
     }
 
     /// `DELETE {chargingprofiles}/{session_id}?response_url={response_url}`.
     #[must_use]
     pub fn clear_charging_profile(&self, session_id: &str, response_url: &Url) -> Url {
-        self.base
-            .join(session_id)
-            .with_query(&format!("response_url={}", percent_encode(response_url.as_str())))
+        self.base.join_segment(session_id).with_param("response_url", response_url.as_str())
     }
 
     /// `{tokens}/{country_code}/{party_id}/{token_uid}[?type={type}]`.
@@ -255,7 +256,7 @@ impl ReceiverEndpoint {
     pub fn token(&self, owner: &PartyRef, token_uid: &str, token_type: Option<&str>) -> Url {
         let url = self.object(owner, token_uid);
         match token_type {
-            Some(t) => url.with_query(&format!("type={t}")),
+            Some(t) => url.with_param("type", t),
             None => url,
         }
     }
@@ -273,24 +274,6 @@ impl ReceiverEndpoint {
         Self::new(sub_path(&self.base, "financial-advice-confirmations"))
     }
 }
-
-/// Percent-encodes a URL so it can be carried as a query parameter value.
-fn percent_encode(value: &str) -> String {
-    let mut out = String::with_capacity(value.len() + 16);
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(byte as char);
-            }
-            _ => {
-                use core::fmt::Write as _;
-                let _ = write!(out, "%{byte:02X}");
-            }
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

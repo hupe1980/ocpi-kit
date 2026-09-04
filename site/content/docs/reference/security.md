@@ -67,6 +67,24 @@ careless cases; two other things stop the deliberate ones:
 
 A test asserts the limitation, so it cannot quietly turn into a false sense of safety.
 
+## Identifiers in URLs
+
+An OCPI identifier is a `CiString(36)`, and the specification puts **no restriction** on which
+characters it may contain. Every id this crate puts in a path therefore goes through
+`Url::join_segment`, which percent-encodes anything that would change the URL's structure —
+`/`, `?`, `#`, `%`, space, every non-ASCII byte — while leaving the shapes real identifiers have
+(`BE*BEC*E041503001`) readable.
+
+Without that, the *value* decides the request target. A `token_uid` of `../credentials` addresses
+a different endpoint; one containing `?` starts a query string; one containing `#` truncates the
+path. All three are reachable from data a peer sent — a Token uid an eMSP pushed, a Location id a
+CPO published — which makes this an injection surface rather than a formatting detail. Query
+parameter values are encoded the same way by `Url::with_param`.
+
+`Url::join` is the raw counterpart, documented as taking an **already-encoded** path, because that
+is what a hub forwards with: the path arrived encoded by the party that sent it, and re-encoding
+it would break the request.
+
 ## Ownership
 
 Client-owned objects live under `{country_code}/{party_id}`. The server checks that a platform

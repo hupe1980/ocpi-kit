@@ -7,7 +7,7 @@
 //! | Layer | Feature | What it gives you |
 //! |---|---|---|
 //! | [`types`] | *(always)* | `CiString`, `DateTime`, `Number`, `Url`, `Extensions`, validation |
-//! | [`v2_3_0`] | `v2_3_0` | the OCPI 2.3.0 wire model, all ten modules |
+//! | [`v2_3_0`] | `v2_3_0` | the OCPI 2.3.0 **core** wire model; `bookings` and `payments` add the two release branches |
 //! | [`v2_2_1`] | `v2_2_1` | the OCPI 2.2.1 wire model |
 //! | [`v2_1_1`] | `v2_1_1` | the OCPI 2.1.1 wire model |
 //! | [`convert`] | `convert` | `Upgrade`/`Downgrade` between versions, with loss accounting |

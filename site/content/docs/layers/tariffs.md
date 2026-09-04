@@ -26,11 +26,13 @@ CostBreakdown
 ├── dimensions: Vec<DimensionCost>          one per ENERGY / TIME / PARKING_TIME / FLAT …
 │   ├── measured, billed, cost, vat         what was metered, what step_size made of it, what it cost
 │   └── segments: Vec<PricedSegment>        the split where the applicable element changed
+│       ├── quantity, price, cost, tax      and tax_basis: how tax_included was read here
 │       └── applied: AppliedComponent       tariff id, element index, component index, and `because`
 ├── total_excl_vat / total_incl_vat
 ├── taxes: Vec<TaxLine>                     name, percentage, taxable base, amount
+├── tax_basis: TaxBasis                     the reading that produced these totals
 ├── limit_applied: Option<PriceLimitApplied>   min_price / max_price, if either bit
-└── notes: Vec<String>                      anything the engine wants you to know
+└── notes: Vec<PricingNote>                 code, moment and message — countable, not greppable
 ```
 
 `AppliedComponent::because` is a sentence, not a code: *why* that Tariff Element matched this
@@ -40,6 +42,22 @@ It serialises, so a disputed invoice becomes a diff of two JSON documents rather
 
 **The arithmetic is exact.** Every value is a decimal. There is no `f64` anywhere in this module.
 See [Numbers and money](@/docs/concepts/numbers.md).
+
+**It reads `tax_included`.** One field of the parent Tariff decides what `quantity × price` means:
+
+> *`price`: Price per unit for this dimension. This is including or excluding taxes according to
+> the `tax_included` field of the Tariff that this PriceComponent is contained in.*
+
+`NO` — the prices are net and the `vat` of each component is added on top. `YES` — they are gross,
+and where a rate is named the tax is taken back **out** so the breakdown still has both totals.
+`N/A` — no tax applies at all, and a `vat` beside it is a contradiction the Tariff-level field
+wins.
+
+Ignoring the field reads a gross amount as a net one and adds the tax a second time, overcharging
+every session under a tax-inclusive tariff by exactly the tax rate. `CostBreakdown::tax_basis` says
+which reading was used; where the prices include tax and no component names a rate — *"tax rates
+are not typically known beforehand to the CPO"* — a `TaxIncludedWithoutRate` note says the two
+totals cannot be told apart, rather than passing the gross figure off as a net one.
 
 **The undefined parts are parameters.** The specification says nothing about rounding, on purpose,
 and OCPI 3.0 removes `step_size` altogether. Both are settings on `PricingPolicy` rather than
@@ -80,10 +98,9 @@ SHALL start a new Charging Period at a price change, so this one should have bee
 ENERGY is billed in full at the earlier rate, because nothing in the period says how it divides
 ```
 
-The total beside it is unchanged — nothing is guessed or interpolated. What changed is that a
-defect which produces a *plausible* number is now a line somebody can act on. A CDR can total
-correctly by luck and still be malformed, which is why `ocpi price` exits non-zero on a note as
-well as on a mismatch.
+The total beside it is unchanged — nothing is guessed or interpolated. A defect that produces a
+*plausible* number becomes a line somebody can act on. A CDR can total correctly by luck and still
+be malformed, which is why `ocpi price` exits non-zero on a note as well as on a mismatch.
 
 Two other things are checked the same way: Charging Periods that are not in chronological order
 (`step_size` is defined in terms of *"the last relevant PriceComponent"*, so out of order it is
@@ -162,12 +179,21 @@ case *and* because it fails safe. An element that never matches leaves its dimen
 Component, and the specification's answer to that is that the dimension is free — so the other
 reading silently gives the energy away.
 
-**Reserved time is priced separately from charging time.** A `ChargingPeriod` can carry `TIME` and
-`RESERVATION_TIME` at once, and the two are priced by different Tariff Elements — one restricted
-with `reservation`, one not. Summing them and looking the total up once would bill the charging
+**Reserved time is priced separately from charging time, and only by an element that says so.** A
+`ChargingPeriod` can carry `TIME` and `RESERVATION_TIME` at once, and the two are priced by
+different Tariff Elements. Summing them and looking the total up once would bill the charging
 minutes at the reservation rate, usually the dearer of the two. Each is looked up in the context
-that describes it, and both appear as their own segment in the breakdown. They still share the
-`TIME` dimension, and so the one `step_size` budget the specification allows.
+that describes it, and both appear as their own segment in the breakdown — with
+`AppliedComponent::reservation` saying which is which, so a CDR's `total_reservation_cost` can be
+checked against something. They still share the `TIME` dimension, and so the one `step_size`
+budget the specification allows.
+
+Which element may price reserved time is the specification's one explicit statement on the matter:
+*"When this field is present, the TariffElement describes reservation costs."* So an element
+**without** a `reservation` restriction — including an unrestricted fallback — does not price it,
+and reserved time that nothing prices is free, with a `NoPriceComponent` note. That is what the
+specification says an unpriced dimension costs, and it errs towards not billing a driver for
+something the CPO never published a price for.
 
 ## Multiple tariffs
 
@@ -186,11 +212,71 @@ Two more are [snapshots](@/docs/reference/verification.md): the `step_size` exam
 full, next to the same session priced under the OCPI 3.0 policy that has no `step_size` at all.
 Side by side, that pair is the clearest statement of what block billing costs a driver.
 
-## Checking a CDR against itself
+## Checking a CDR
 
 ```console
 $ ocpi price cdr.json --tariff tariff.json --time-zone Europe/Berlin
 ```
 
-prints the breakdown and then compares the total with the one the CDR claims. That is the invoice
-check, and it is one command.
+prints the breakdown and then `verify_cdr`'s report. That comparison is three separate things, and
+they fail for different reasons:
+
+1. **The two totals**, against `total_cost`.
+2. **The five per-dimension costs** — `total_energy_cost`, `total_time_cost`,
+   `total_parking_cost`, `total_fixed_cost`, `total_reservation_cost` — each against the dimension
+   it names. Two implementations that disagree on a total usually agree on three dimensions out of
+   four, and the fourth is the answer.
+3. **The CDR against itself**: `total_energy` and `total_parking_time` against what its own
+   Charging Periods add up to, and `total_time` against its own `start_date_time` and
+   `end_date_time` — because `total_time` is *"the total duration of the charging session
+   (including the duration of charging and not charging)"*, which is the session, not the `TIME`
+   dimension.
+
+The third group needs no tariff and admits no interpretation. A CDR whose headline quantities do
+not match its own periods or its own clock is malformed whoever prices it, and a total that comes
+out right anyway does not make it less so — `CdrVerification::is_self_inconsistent` is the question
+to ask when a partner disputes the interpretation but not the data.
+
+One thing is deliberately *not* compared. `total_fixed_cost` excludes *"fixed price components of
+parking and reservation"* and `total_parking_cost` and `total_reservation_cost` each include
+theirs — and OCPI gives no way to say which `FLAT` component belongs to which. When a session has
+a `FLAT` and any parking or reserved time, those three comparisons are skipped rather than
+reported as a disagreement this crate cannot adjudicate.
+
+`verify_cdr_within` takes a tolerance, for a contract that allows a rounding difference. The
+default is exact, because a cent that appears from nowhere is the thing this exists to find.
+
+## Linting a Tariff
+
+`validate()` answers *"does this object conform to the specification?"*. `lint()` answers the one
+that costs money: **does this Tariff say what its author meant?**
+
+```console
+$ ocpi lint tariff.json
+[unreachable_element] /elements/1/price_components/0: element 0 prices ENERGY and its restrictions
+always match, so this Price Component can never apply. The unrestricted element is the fallback
+and belongs last
+```
+
+Every finding is a Tariff that decodes, validates and prices sessions — just not the way it reads.
+The fifteen codes cover:
+
+| Finding | Why it matters |
+|---|---|
+| `unreachable_element` | An unrestricted element before a restricted one makes the restricted one dead. The commonest way a tiered tariff is written backwards |
+| `unused_time_step_size` | A `TIME` `step_size` on a tariff that also prices `PARKING_TIME`, which absorbs all of it. It is present, it looks like it does something, and it does not |
+| `impossible_restriction` | `min_kwh` at or above `max_kwh`, and its four siblings: the element can never apply |
+| `empty_restrictions` | A `TariffRestrictions` with nothing in it — a fallback that does not read like one |
+| `whole_day_window` | `start_time == end_time`, which the specification does not define and this crate reads as the whole day |
+| `zero_step_size` | A `step_size` of `0` on a dimension with a unit: no quantisation, where `1` was probably meant |
+| `reservation_dimension` | A reservation element pricing `ENERGY` or `PARKING_TIME`, which a reservation cannot have |
+| `tax_rate_without_tax` | A `vat` percentage on a Tariff that says no tax applies |
+| `tax_included_without_rate` | Prices include tax and nothing says at what rate, so no party can derive a pre-tax total |
+| `price_limits_cross`, `never_active`, `implausible_vat`, `duplicate_dimension`, `flat_step_size`, `nothing_priced_by_use` | Each one a statement the Tariff makes that it cannot mean |
+
+`ocpi lint` exits non-zero, so publishing a tariff can be gated on it.
+
+It reports one in the specification's **own** `tariff_13` example: a `TIME` `step_size` of 60 on a
+tariff that also prices `PARKING_TIME`. Harmless there — the session charges for exactly 150
+minutes — and exactly the shape on which two readings of the `step_size` sentence disagree about a
+real one.

@@ -19,9 +19,11 @@ use super::extract::{
 use super::traits::{
     CdrsReceiver, CdrsSender, ChargingProfilesReceiver, ChargingProfilesSender, CommandsReceiver,
     CommandsSender, CredentialsHandler, HubClientInfoReceiver, HubClientInfoSender, LocationsReceiver,
-    LocationsSender, PaymentsReceiver, PaymentsSender, SessionsReceiver, SessionsSender, TariffsReceiver,
-    TariffsSender, TokensReceiver, TokensSender,
+    LocationsSender, SessionsReceiver, SessionsSender, TariffsReceiver, TariffsSender, TokensReceiver,
+    TokensSender,
 };
+#[cfg(feature = "payments")]
+use super::traits::{PaymentsReceiver, PaymentsSender};
 
 /// How the server behaves.
 #[derive(Clone, Debug)]
@@ -1359,6 +1361,8 @@ impl OcpiRouter {
     }
 
     /// Mounts the Payments Sender interface: the terminals and financial advice this PTP owns.
+    #[cfg(feature = "payments")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "payments")))]
     #[must_use]
     pub fn payments_sender<H: PaymentsSender>(mut self, handler: H) -> Self {
         self.check_interface_conflict(&ModuleId::Payments, InterfaceRole::Sender);
@@ -1529,6 +1533,8 @@ impl OcpiRouter {
     ///
     /// Note the `POST`: unlike every other Receiver interface in OCPI these objects are created
     /// with `POST` and their URLs carry no owning party.
+    #[cfg(feature = "payments")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "payments")))]
     #[must_use]
     pub fn payments_receiver<H: PaymentsReceiver>(mut self, handler: H) -> Self {
         self.check_interface_conflict(&ModuleId::Payments, InterfaceRole::Receiver);
@@ -1642,6 +1648,37 @@ impl OcpiRouter {
             self.version,
         );
         let bridging = self.version != crate::CANONICAL_VERSION;
+        if bridging {
+            // The translating middleware sees a path, not a route, so the only thing that tells
+            // it which interface a request addressed is the receiver prefix. Without one, both
+            // interfaces of a module are mounted at the same shape and it would have to guess —
+            // and a wrong guess translates a body with the other interface's rules, or skips the
+            // translation and hands a 2.2.1 document to a handler written against 2.3.0. Neither
+            // fails loudly, so the combination is refused here instead.
+            //
+            // This is a superset of `check_interface_conflict`, which only covers the modules
+            // whose two interfaces have the same *path arity*; version bridging cannot tell them
+            // apart for any module.
+            let doubled: Vec<String> = self
+                .mounted
+                .all()
+                .iter()
+                .filter(|(module, role)| {
+                    *role == InterfaceRole::Sender && self.mounted.contains(module, InterfaceRole::Receiver)
+                })
+                .map(|(module, _)| module.to_string())
+                .collect();
+            assert!(
+                self.config.receiver_path_prefix.is_some() || doubled.is_empty(),
+                "a router published as OCPI {} translates every body at the edge, and it \
+                 recognises a Receiver request by ServerConfig::receiver_path_prefix. With no \
+                 prefix and both interfaces of {} mounted, it cannot tell the two apart, so it \
+                 would translate some bodies with the wrong object's rules. Set a \
+                 receiver_path_prefix, or build one router per interface role.",
+                self.version,
+                doubled.join(", "),
+            );
+        }
         let state = Arc::new(OcpiState {
             tokens: self.tokens,
             config: self.config,
@@ -1938,6 +1975,40 @@ mod tests {
         let mut r = router(ServerConfig::default().one_router_per_role());
         r.mounted.add(ModuleId::Tokens, InterfaceRole::Sender);
         r.check_interface_conflict(&ModuleId::Tokens, InterfaceRole::Receiver);
+    }
+
+    /// A bridging router cannot serve both interfaces of *any* module without a prefix.
+    ///
+    /// `check_interface_conflict` covers the modules whose two interfaces have the same path
+    /// arity, because those confuse `axum`'s router. This is a wider problem and a quieter one:
+    /// the translating middleware sees a path rather than a route, and with both interfaces at
+    /// the same shape it cannot tell which object a body is — so it would translate some bodies
+    /// with the wrong rules and skip others, neither of which fails visibly.
+    #[test]
+    fn a_bridging_router_refuses_both_interfaces_of_a_module_with_no_prefix() {
+        let build = |version: VersionNumber, prefix: Option<&str>| {
+            let config = match prefix {
+                Some(p) => ServerConfig::default().with_receiver_path_prefix(p),
+                None => ServerConfig::default().one_router_per_role(),
+            };
+            let mut r = OcpiRouter::new(
+                version,
+                Url::new("https://cpo.example.com/ocpi/cpo/x").expect("a valid URL"),
+                Arc::new(super::super::InMemoryTokenStore::new()),
+            )
+            .with_config(config);
+            // Tokens is not path-ambiguous, so nothing else refuses this combination.
+            r.mounted.add(ModuleId::Tokens, InterfaceRole::Sender);
+            r.mounted.add(ModuleId::Tokens, InterfaceRole::Receiver);
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || r.build()))
+        };
+
+        assert!(build(VersionNumber::V2_2_1, None).is_err(), "a 2.2.1 router must refuse it");
+        assert!(build(VersionNumber::V2_2_1, Some("receiver")).is_ok(), "a prefix settles it");
+        assert!(
+            build(VersionNumber::V2_3_0, None).is_ok(),
+            "a canonical router translates nothing, so it never had this problem",
+        );
     }
 
     #[test]

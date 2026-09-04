@@ -4,7 +4,28 @@ weight = 10
 description = "Field census, fixture round-trips, property tests, misbehaving mock peers, and what the guarantees cost."
 +++
 
-Ten techniques, each catching a class of problem the others cannot.
+Sixteen techniques, each catching a class of problem the others cannot.
+
+## The specification, pinned
+
+Everything below reads the OCPI sources, and OCPI is published under CC BY-ND 4.0 — so this
+repository does not vendor them. What it commits instead is `spec-sources.toml`, which names each
+release, its branch and its **commit**, and `spec-sources.lock`, a SHA-256 of all 479 files the
+censuses read.
+
+```console
+$ cargo run -p xtask -- spec-sync --fetch    # materialise exactly those commits
+$ cargo run -p xtask -- spec-sync --check    # 479 files match the lock exactly
+$ cargo run -p xtask -- spec-sync --latest   # has upstream edited a released branch?
+```
+
+CI runs the first two before the censuses, so every check below runs against known sources on
+every push.
+
+OCPI edits released branches **in place**, with no version bump: a module can move between 2.3.0
+core and a release branch under an unchanged version number. A crate written against the earlier
+layout compiles and passes its tests while being wrong about which release defines what, so a
+weekly job runs `--latest` and fails when a pinned branch moves.
 
 ## Field census against the specification's tables
 
@@ -13,7 +34,7 @@ tables out of the AsciiDoc and the field lists out of the Rust source, per relea
 anything missing, extra or renamed.
 
 ```text
-=== OCPI 2.3.0 ===                 59 object(s) match exactly
+=== OCPI 2.3.0 ===                 58 object(s) match exactly
 === OCPI 2.2.1 ===                 53 object(s) match exactly
 === OCPI 2.1.1 ===                 33 object(s) match exactly
 === OCPI 2.3.0 bookings branch === 70 object(s) match exactly
@@ -25,12 +46,11 @@ A field one release adds to an object another release also defines is declared i
 
 ## Enum census against the specification's value tables
 
-`cargo run -p xtask -- enum-coverage --check
-cargo run -p xtask -- field-shapes --check` does the same thing one level down: the **values** of
-every enum, against the tables that define them.
+`cargo run -p xtask -- enum-coverage --check` does the same thing one level down: the **values**
+of every enum, against the tables that define them.
 
 ```text
-=== OCPI 2.3.0 enums ===   35 enum(s) match exactly
+=== OCPI 2.3.0 enums ===   33 enum(s) match exactly
 === OCPI 2.2.1 enums ===   31
 === OCPI 2.1.1 enums ===   20
 === bookings branch ===    38
@@ -50,7 +70,7 @@ not.
 the cardinality marker and the declared length.
 
 ```text
-=== OCPI 2.3.0 field shapes ===   304 field(s) match
+=== OCPI 2.3.0 field shapes ===   286 field(s) match
 === OCPI 2.2.1 field shapes ===   249
 === OCPI 2.1.1 field shapes ===   145
 === bookings branch ===           377
@@ -60,20 +80,21 @@ the cardinality marker and the declared length.
 A field the table marks `?` and the crate makes required rejects a conformant peer's object; one
 marked `1` and modelled `Option` lets this crate emit an object missing a mandatory field. A length
 that is too small reports a conformant value as `TooLong` and, with outgoing validation on, refuses
-to send it — which is what `SignedData.url` did before this check existed.
+to send it.
 
 ## Round-trip of every example the specification ships
 
-`tests/fixtures.rs` decodes each of the 218 JSON examples into the type the specification says it
+`tests/fixtures.rs` decodes each of the 279 JSON examples into the type the specification says it
 is, validates it, re-encodes it, and asserts *canonical* equality with the source — same keys,
 same values, with only key order and number formatting normalised.
 
 | Corpus | Examples |
 |---|---|
-| 2.3.0 | 72 |
+| 2.3.0 core | 61 |
 | 2.2.1 | 59 |
 | 2.1.1 | 18 (extracted from the inline Markdown) |
 | 2.3.0 bookings branch | 69 |
+| 2.3.0 payments branch | 72 |
 
 Every file must have a recorded expectation, so a newly synced example cannot pass unexamined:
 
@@ -85,6 +106,19 @@ Every file must have a recorded expectation, so a newly synced example cannot pa
   the JSON string `"2.00"`; it is parsed exactly and emitted unquoted.
 
 See [Spec errata](@/docs/reference/errata.md).
+
+## Nothing is dropped in silence
+
+The round-trip suite proves a 2.2.1 object survives a visit to 2.3.0. It cannot prove the *other*
+direction is honest: going back always loses something, so a test that only compares values would
+pass a conversion that dropped a field without saying so — which is the one thing this crate
+claims a hub built on it will not do.
+
+So `tests/version_bridging.rs` walks the JSON: every leaf pointer present in a 2.3.0 example and
+absent from its 2.2.1 downgrade has to be **named** by the `Lossy` report, exactly or by a prefix.
+The only exceptions are an explicit table of *renames* — `before_taxes` → `excl_vat`, the tax
+lines, and `tax_included` — which is itself the whole semantic difference between the two versions'
+money. A field modelled without a matching `lossy.record` fails here.
 
 ## Property tests
 
@@ -110,15 +144,23 @@ objects, and the version bridge over a document that is not the object its endpo
 crate forbids `unsafe`, so a hostile peer's leverage is not memory corruption: it is a panic, and
 one inside a hub's forwarder kills a task holding somebody else's message.
 
-Plus three the pricing engine's output has to satisfy for **any** tariff and **any** session:
+Plus three the pricing engine's output has to satisfy for **any** tariff and **any** session —
+under all three readings of `tax_included`, since each one means something different by
+`quantity × price`:
 
 * the tax lines account for exactly the difference between the two totals
 * the inclusive total is never below the exclusive one, and neither is ever negative
 * the whole breakdown round-trips through JSON
 
-The first of those found a defect within seconds of being written, on a code path older than the
-audit that added it: tax lines were accumulated at four decimal places while the totals rounded to
-two, so they had never quite added up. No assertion on a total would have shown it.
+The first is the one that catches arithmetic no assertion on a total can see — tax lines
+accumulated at a different precision from the totals they have to reconcile with.
+
+## Lints against the specification's own tariffs
+
+`tariffs::lint` reports the Tariff constructions that are legal, conformant and still not what
+their author meant. A test runs it over the tariffs the specification publishes as models to copy,
+where it must stay silent — with one recorded exception: `tariff_13` carries a `TIME` `step_size`
+that its own chapter's rule makes inert. See [Spec errata](@/docs/reference/errata.md).
 
 ## Snapshots of what a person reads
 
@@ -135,11 +177,9 @@ costs a driver.
 
 When one changes, the diff is the review — `cargo insta review`.
 
-This is not a formality. Rendering a `CostBreakdown` in full is what surfaced
-`"measured": 0.13333333333333333`: a quantity carrying more significant digits than a JSON number
-holds, which this crate's own `Number::json_round_trips` reports as imprecise. No assertion on a
-total would ever have shown it, and an audit artefact that does not survive being written down is
-not an audit artefact.
+Rendering a `CostBreakdown` in full is also what shows a quantity like
+`"measured": 0.13333333333333333` — more significant digits than a JSON number holds, which this
+crate's own `Number::json_round_trips` reports as imprecise. A total alone never shows it.
 
 ## The client against peers that behave badly
 
@@ -199,15 +239,58 @@ test suite, and against the [reference peer](@/docs/layers/testkit.md) that `ocp
 serves. Every check it makes is a rule the router is supposed to follow, so the three keep each
 other honest.
 
+## Every field reaches the validator
+
+`Validate` is written by hand, one `validate_fields!` call per object, and a field added to a
+struct but not to that call is invisible: the object decodes, validates clean, and the peer's value
+is never reported.
+
+`cargo run -p xtask -- validate-coverage` compares the two — 728 fields across 114 objects — and is
+type-driven rather than a list of names: a `bool` carries no constraint the specification could
+state, while a `CiString`, a `Number` or an enum does.
+
+## Fuzzing, seeded from the specification
+
+The property tests assert panic-freedom for every parser a peer controls the input of, over
+**generated values**. `fuzz/` makes the same claim over **generated bytes**, which is what finds
+the input no generator would think to build.
+
+Six libFuzzer targets — `wire`, `envelope`, `patch`, `bridge`, `pricing`, `headers` — cover the
+decoders, the merge-patch path, the version bridge and the pricing engine. `pricing` is the
+interesting one: it decodes a CDR and a Tariff out of one input, prices one against the other, and
+**asserts the breakdown's own invariant** — that the tax lines account for exactly the difference
+between the two totals — on every input that gets that far.
+
+```console
+$ cargo run -p xtask -- fuzz-corpus     # seed from the 279 examples
+$ cd fuzz && cargo +nightly fuzz run pricing -- -max_total_time=300
+```
+
+Seeding matters: a fuzzer starting from nothing spends its first hours discovering that OCPI
+documents are JSON. A nightly workflow runs every target for five minutes and keeps whatever
+crashes.
+
+## Mutation testing
+
+`cargo mutants` over the pricing engine: 169 mutants, 121 caught, 32 unviable, 12 timeouts, 4
+missed. It is where the boundary tests come from. The specification is explicit about which bounds
+are inclusive and which exclusive — `min_kwh` inclusive, `max_kwh` exclusive, `min_duration`
+inclusive, `max_duration` exclusive — and the only input that tells `<` from `<=` is a session
+landing exactly on one, so there is a test per boundary quoting the sentence it is about.
+
+The four survivors are listed rather than rounded away: three are equivalent mutants, and one is
+the `+` in "one second before the period ends", where both readings land inside the same tariff
+element.
+
 ## Everything else
 
-526 tests across twelve targets, under three feature sets on three platforms.
+574 tests across twelve targets, under three feature sets on three platforms.
 
 * Clippy at `pedantic` with `-D warnings`, under three feature sets.
 * Every feature, and every pair of layer features, compiled — this is what catches a layer using a
   wire model it never declared a dependency on, invisible while that model is a default feature.
 * `cargo deny` over bans, licences, sources and advisories.
-* `xtask no-floats` across 64 files, and `xtask dead-config` over every public configuration field.
+* `xtask no-floats` across 66 files, and `xtask dead-config` over every public configuration field.
 * The benchmarks compile in CI, so they cannot rot.
 
 ```console

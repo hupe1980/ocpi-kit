@@ -9,7 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ocpi_enum;
+use crate::ocpi_lenient_enum;
 use crate::types::validate_fields;
 use crate::types::{CountryCode, DateTime, Extensions, PartyId, PartyRef, Validate, Validator};
 
@@ -69,7 +69,7 @@ impl Validate for ClientInfo {
     }
 }
 
-ocpi_enum! {
+ocpi_lenient_enum! {
     /// The state of a hub's connection to one party.
     ///
     /// Spec: 2.3.0 §mod_hub_client_info_hub_connection_type_enum
@@ -91,7 +91,7 @@ impl ConnectionStatus {
     /// A `PLANNED` party has never connected and a `SUSPENDED` one never will, so polling either
     /// is wasted work.
     #[must_use]
-    pub const fn should_poll(self) -> bool {
+    pub fn should_poll(&self) -> bool {
         matches!(self, Self::Connected | Self::Offline)
     }
 }

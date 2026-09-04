@@ -69,7 +69,7 @@ There is a typed client for every module the crate models a protocol for:
 | `peer.commands(…)` | send a command, and await its result at a URL you serve |
 | `peer.charging_profiles(…)` | set, read and clear a profile on a session |
 | `peer.hub_client_info(…)` | who a hub says is connected |
-| `peer.payments(…)` | terminals and financial advice confirmations, from either side |
+| `peer.payments(…)` | terminals and financial advice confirmations, from either side. Needs the `payments` feature: Payments is a 2.3.0 release branch, not core |
 
 Anything else — the `bookings` and `invoicereconciliation` extension modules, or a peer's vendor
 module — goes through `peer.module(…)`, the untyped `ModuleClient`, which still gives you the

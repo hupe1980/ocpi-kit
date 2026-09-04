@@ -16,24 +16,31 @@ envelope OCPI messages without pulling in an HTTP stack.
 
 | Feature | Pulls in | What it gives you |
 |---|---|---|
-| `v2_3_0` | — | the OCPI 2.3.0 wire model, 59 objects. The canonical model of this crate |
+| `v2_3_0` | — | the OCPI 2.3.0 **core** wire model, 58 objects, Invoice Reconciliation included. The canonical model of this crate |
 | `v2_2_1` | `v2_3_0` | the OCPI 2.2.1 wire model, 53 objects, defined as a delta |
 | `v2_1_1` | `v2_3_0` | the OCPI 2.1.1 wire model, 33 objects, for legacy peers |
-| `bookings` | `v2_3_0` | the Bookings module of the 2.3.0 `bookings` release branch |
-| `invoice-reconciliation` | `v2_3_0` | the Invoice Reconciliation module of the `payments` branch |
+| `bookings` | `v2_3_0` | the Bookings module of the 2.3.0 `bookings` release branch, and the fields it adds to core objects |
+| `payments` | `v2_3_0` | the Payments module of the 2.3.0 `payments` release branch, and `Tariff.preauthorize_amount` |
 | `transport` | — | envelope, status codes, headers, credentials tokens, pagination, routing, PATCH |
 | `client` | `transport`, `v2_3_0`, `convert`, `reqwest`, `tokio` | async client and the registration handshake |
 | `server` | `transport`, `v2_3_0`, `convert`, `axum`, `tokio` | the router and its module traits |
 | `hub` | `client`, `server` | routing table, forwarder, aggregation, version bridging |
 | `convert` | `v2_2_1`, `v2_3_0` | `Upgrade`/`Downgrade` with loss accounting, and the JSON-level bridge |
-| `tariffs` | `tzdb`, `tz-rs` | the pricing engine |
-| `testkit` | `transport` | validated samples and in-memory stores |
+| `tariffs` | `v2_3_0`, `tzdb`, `tz-rs` | the pricing engine, the Tariff linter and the CDR verifier |
+| `testkit` | `transport`, `v2_3_0` | validated samples, in-memory stores and `MockPeer` |
 | `schema` | `schemars` | `JsonSchema` for every wire type |
 | `full` | all of the above | everything except the CLI |
 | `cli` | `full`, `clap` | the `ocpi` binary |
 
 The [conformance runner](@/docs/layers/conformance.md) comes with `client`; it needs no feature of its
 own.
+
+**Payments and Bookings are release branches, not core.** OCPI 2.3.0 is published as a core
+release plus two branches, and each branch adds a module *and* a field or two to core objects —
+`Tariff.preauthorize_amount` for Payments, `Cdr.booking_id` for Bookings. The features mirror that:
+enable `payments` to speak to a Payment Terminal Provider, and the Tariff field comes with it.
+Invoice Reconciliation is core and needs no feature. Which release defines what is
+[checked](@/docs/reference/traceability.md) against pinned sources, not remembered.
 
 `client`, `server` and `hub` enable `convert` for the same reason they enable `v2_3_0`: they speak
 the canonical model and translate the peer onto it, so a peer on OCPI 2.2.1 — most of the market —

@@ -292,7 +292,7 @@ impl Conformance {
         };
         report.version = Some(version.clone());
 
-        Self::check_endpoints(&mut report, &version, &details);
+        Self::check_endpoints(transport, &mut report, &version, &details);
         if self.check_auth {
             self.check_authentication(transport, &mut report, &details).await;
         }
@@ -438,7 +438,12 @@ impl Conformance {
     }
 
     /// Everything that can be checked about the endpoint list without calling any of it.
-    fn check_endpoints(report: &mut Report, version: &VersionNumber, details: &VersionDetails) {
+    fn check_endpoints(
+        transport: &Transport,
+        report: &mut Report,
+        version: &VersionNumber,
+        details: &VersionDetails,
+    ) {
         const SPEC: &str = "2.3.0 §version_information_endpoint_endpoint_class";
 
         report.assert(
@@ -484,6 +489,19 @@ impl Conformance {
                     "every endpoint URL is absolute",
                     format!("{}/{}: {e}", endpoint.identifier, endpoint.role),
                     "2.3.0 §types_url_type",
+                );
+            }
+            // An endpoint a client will refuse to call is as unusable as one that 404s, and the
+            // reason is invisible from the peer's side: a version-details document generated
+            // from an internal address behind a reverse proxy publishes `http://10.0.0.5:8080/…`
+            // to the whole network, and every partner's SSRF guard — including this crate's —
+            // declines it.
+            if let Err(e) = transport.url_policy().check(&endpoint.url) {
+                report.fail(
+                    "endpoints.reachable",
+                    "every endpoint URL is one a partner may call",
+                    format!("{}/{}: {e}", endpoint.identifier, endpoint.role),
+                    "2.3.0 §version_information_endpoint_endpoint_class",
                 );
             }
         }
@@ -653,6 +671,19 @@ impl Conformance {
                 "absent, so a client cannot size the crawl",
                 SPEC,
             ),
+        }
+
+        // The next link is a URL this client is about to call, on a peer's say-so.
+        if let Some(next) = page.meta.next.as_ref() {
+            let same_host = next.parse().ok().and_then(|n| n.host_str().map(str::to_owned))
+                == url.parse().ok().and_then(|u| u.host_str().map(str::to_owned));
+            report.assert(
+                "module.link_host",
+                &format!("{module}'s next link stays on the same host"),
+                same_host && transport.url_policy().check(next).is_ok(),
+                format!("{module} pages on to {next}"),
+                SPEC,
+            );
         }
 
         Self::check_objects(report, module, &page.items);

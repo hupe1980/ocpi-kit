@@ -54,7 +54,8 @@ mod forwarder;
 mod routing_table;
 
 pub use forwarder::{
-    AggregatePolicy, BodyOwnerRouter, Forwardable, Forwarder, OpenRouter, Relayed, Unbridgeable, aggregate,
+    AggregatePolicy, BodyOwnerRouter, DEFAULT_FANOUT_CONCURRENCY, Forwardable, Forwarder, OpenRouter,
+    Relayed, Unbridgeable, aggregate,
 };
 pub use routing_table::{ConnectedPlatform, RoutingTable};
 

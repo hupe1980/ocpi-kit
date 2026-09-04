@@ -46,7 +46,7 @@ impl<T: Stored> InMemoryStore<T> {
     /// Returns whether the object was newly created, which is what decides between HTTP 201 and
     /// HTTP 200 on a `PUT`.
     pub fn put(&self, item: T) -> bool {
-        let mut items = self.items.write().expect("store lock poisoned");
+        let mut items = self.items.write().unwrap_or_else(std::sync::PoisonError::into_inner);
         let key = item.key().to_ascii_lowercase();
         if let Some(index) = items.iter().position(|existing| existing.key().to_ascii_lowercase() == key) {
             items[index] = item;
@@ -60,13 +60,13 @@ impl<T: Stored> InMemoryStore<T> {
     /// Fetches an object by id, comparing case-insensitively.
     #[must_use]
     pub fn get(&self, key: &str) -> Option<T> {
-        let items = self.items.read().expect("store lock poisoned");
+        let items = self.items.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         items.iter().find(|item| item.key().eq_ignore_ascii_case(key)).cloned()
     }
 
     /// Removes an object.
     pub fn remove(&self, key: &str) -> bool {
-        let mut items = self.items.write().expect("store lock poisoned");
+        let mut items = self.items.write().unwrap_or_else(std::sync::PoisonError::into_inner);
         let before = items.len();
         items.retain(|item| !item.key().eq_ignore_ascii_case(key));
         items.len() != before
@@ -75,7 +75,7 @@ impl<T: Stored> InMemoryStore<T> {
     /// How many objects are stored.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.items.read().expect("store lock poisoned").len()
+        self.items.read().unwrap_or_else(std::sync::PoisonError::into_inner).len()
     }
 
     /// Whether the store is empty.
@@ -87,7 +87,7 @@ impl<T: Stored> InMemoryStore<T> {
     /// Every object, oldest first.
     #[must_use]
     pub fn all(&self) -> Vec<T> {
-        let mut items = self.items.read().expect("store lock poisoned").clone();
+        let mut items = self.items.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
         items.sort_by_key(Stored::last_updated);
         items
     }

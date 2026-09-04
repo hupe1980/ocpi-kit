@@ -26,7 +26,7 @@
 </section>
 
 <section class="pillars" aria-labelledby="pillars-h">
-  <h2 id="pillars-h" class="section-title">Three properties that decide quality</h2>
+  <h2 id="pillars-h" class="section-title">Four properties that decide quality</h2>
   <div class="grid-3">
     <article class="card">
       <h3>Money is never a float</h3>
@@ -65,6 +65,20 @@
         Parse permissively, validate explicitly, construct strictly.
       </p>
       <a class="card-link" href="{{ get_url(path='@/docs/concepts/parse-validate-construct.md') }}">The rule →</a>
+    </article>
+
+    <article class="card">
+      <h3>One model, whatever the peer speaks</h3>
+      <p>
+        Your handlers, your client calls and your hub are written against OCPI 2.3.0. The wire
+        speaks whatever the other party runs — usually 2.2.1. The crossing is translated at the
+        edge, and what it cost is reported.
+      </p>
+      <p class="card-note">
+        A 2.2.1 <code>Tariff</code> has no <code>tax_included</code>, which 2.3.0 made required.
+        Modelling both versions and translating neither decodes most of the market wrongly.
+      </p>
+      <a class="card-link" href="{{ get_url(path='@/docs/concepts/versions.md') }}">Versions →</a>
     </article>
   </div>
 </section>
@@ -123,7 +137,7 @@
     </a>
     <a class="tile" href="{{ get_url(path='@/docs/getting-started/cli.md') }}">
       <h3>CLI</h3>
-      <p><code>validate</code>, <code>versions</code>, <code>pull</code>, <code>price</code>, <code>convert</code>, <code>conformance</code>, <code>schema</code>.</p>
+      <p><code>validate</code>, <code>versions</code>, <code>pull</code>, <code>price</code>, <code>lint</code>, <code>convert</code>, <code>conformance</code>, <code>serve-mock</code>, <code>schema</code>.</p>
     </a>
   </div>
 </section>
@@ -135,9 +149,9 @@
     the crate with the specification on every push.
   </p>
   <ul class="stats">
-    <li><strong>275</strong><span>object field-censuses across five releases</span></li>
-    <li><strong>218</strong><span>spec examples round-tripped byte-for-byte</span></li>
-    <li><strong>414</strong><span>tests across seven targets</span></li>
+    <li><strong>274</strong><span>object field-censuses across five releases</span></li>
+    <li><strong>279</strong><span>spec examples round-tripped byte-for-byte</span></li>
+    <li><strong>574</strong><span>tests across twelve targets</span></li>
     <li><strong>0</strong><span>floats in the wire models or the pricing engine</span></li>
   </ul>
   <p class="center">

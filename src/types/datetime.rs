@@ -94,23 +94,32 @@ impl DateTime {
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let instant: DateTime = "2024-01-15T23:30:00Z".parse()?;
-    /// let local = instant.local_parts(3600); // CET, UTC+1
+    /// let local = instant.local_parts(3600)?; // CET, UTC+1
     /// assert_eq!(local.time.hour(), 0);
     /// assert_eq!(local.date.day(), 16);
     /// assert_eq!(local.iso_weekday, 2); // Tuesday
     /// # Ok(())
     /// # }
     /// ```
-    #[must_use]
-    pub fn local_parts(self, offset_seconds: i32) -> crate::types::LocalParts {
-        let local = self.instant + time::Duration::seconds(i64::from(offset_seconds));
-        crate::types::LocalParts {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidDateTime`] when shifting by the offset lands outside the representable
+    /// range of dates. That needs a timestamp within a day of the end of time, which a peer can
+    /// send: `9999-12-31T23:59:59Z` is a conformant OCPI `DateTime`, and pricing it against a
+    /// Location in `Pacific/Kiritimati` would otherwise panic in the middle of a hub.
+    pub fn local_parts(self, offset_seconds: i32) -> Result<crate::types::LocalParts, InvalidDateTime> {
+        let local = self
+            .instant
+            .checked_add(time::Duration::seconds(i64::from(offset_seconds)))
+            .ok_or_else(|| InvalidDateTime::new("local time is outside the representable range"))?;
+        Ok(crate::types::LocalParts {
             date: crate::types::LocalDate::from_date(local.date()),
             // Hour and minute out of a real timestamp are always in range.
             time: crate::types::LocalTime::new(local.hour(), local.minute())
                 .expect("an hour and minute from a timestamp are in range"),
             iso_weekday: local.weekday().number_from_monday(),
-        }
+        })
     }
 
     /// Seconds since the Unix epoch.
@@ -451,6 +460,19 @@ impl schemars::JsonSchema for DateTime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_local_shift_past_the_end_of_time_is_an_error_rather_than_a_panic() {
+        // A conformant OCPI DateTime a peer can send, plus the offset of a Location in
+        // Pacific/Kiritimati (+14). Shifting it lands outside what a date can hold, and the
+        // pricing engine reaches this on any CDR carrying such a timestamp.
+        let end_of_time: DateTime = "9999-12-31T23:59:59Z".parse().unwrap();
+        assert!(end_of_time.local_parts(14 * 3600).is_err());
+        // The other end, and the ordinary case.
+        assert!(end_of_time.local_parts(-14 * 3600).is_ok());
+        let ordinary: DateTime = "2024-01-15T23:30:00Z".parse().unwrap();
+        assert_eq!(ordinary.local_parts(3600).unwrap().date.day(), 16);
+    }
 
     #[test]
     fn parses_all_six_spec_forms() {

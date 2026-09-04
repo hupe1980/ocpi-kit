@@ -1,5 +1,13 @@
 xtask — repository automation for ocpi-kit
 
+  spec-sync [--check]      Compare the vendored specification with the pins in
+            [--fetch]      spec-sources.toml and the per-file digests in spec-sources.lock.
+            [--update]     --fetch materialises exactly the pinned commits (what CI runs before
+            [--latest]     the censuses, so that a green run means something); --check fails on
+                           any drift; --update re-records the lock; --latest reports how far
+                           upstream has moved past each pin. OCPI edits released branches in
+                           place, so this is the only thing that notices.
+
   sync-fixtures            Copy every JSON example from specs/src/ into fixtures/, and extract
                            the inline examples that OCPI 2.1.1 embeds in Markdown.
 
@@ -21,9 +29,30 @@ xtask — repository automation for ocpi-kit
                            is too small reports a conformant value as TooLong and refuses to send
                            it. With --check, exits non-zero on a mismatch. CI runs it.
 
+  endpoints [--check]      Compare the URLs this crate builds with the endpoint structures the
+                           specification writes, both halves anchored: the pattern must still be
+                           in the chapter character for character, and the builder must produce
+                           what it describes. No census compares URLs, and a URL is where an
+                           integration breaks. CI runs it.
+
+  errata [--check]         Re-derive every recorded specification defect from the pinned sources.
+                           An erratum upstream fixes turns a documented workaround into a false
+                           claim; this makes that a failing build instead. CI runs it.
+
   dead-config              Check that every public configuration field is read somewhere, not
                            merely assigned. A setting that does nothing is worse than a missing
                            feature: somebody sets it, believes the problem is handled, and ships.
+                           CI runs it.
+
+  fuzz-corpus              Seed fuzz/corpus/<target>/ from the specification's own examples, so a
+                           coverage-guided run starts from documents that decode rather than
+                           rediscovering JSON. Pairs a CDR with a Tariff, and a Location with a
+                           patch, for the two targets that read two documents from one input.
+
+  validate-coverage        Check that every field of every wire object reaches `Validate`. A field
+            [--check]      added to a struct and not to its `validate_fields!` call is invisible:
+                           the object decodes, validates clean, and the peer's value is never
+                           reported. Type-driven — a bool carries no constraint, a CiString does.
                            CI runs it.
 
   no-floats                Scan the wire models and the pricing engine for `f32`/`f64`. Money in

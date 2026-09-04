@@ -7,7 +7,7 @@
 use bon::Builder;
 use serde::{Deserialize, Serialize};
 
-use crate::ocpi_enum;
+use crate::ocpi_lenient_enum;
 use crate::ocpi_open_enum;
 use crate::types::validate_fields;
 use crate::types::{
@@ -339,6 +339,7 @@ impl Validate for Evse {
             v,
             uid,
             evse_id,
+            status,
             status_schedule,
             capabilities,
             connectors,
@@ -904,7 +905,10 @@ impl Hours {
         if self.twentyfourseven {
             return true;
         }
-        let local = instant.local_parts(utc_offset_seconds);
+        let Ok(local) = instant.local_parts(utc_offset_seconds) else {
+            // A timestamp within a day of the end of time, which no Location is open at.
+            return false;
+        };
         self.regular_hours
             .iter()
             .any(|r| r.weekday == local.iso_weekday && local.time.is_within(r.period_begin, r.period_end))
@@ -1167,7 +1171,7 @@ ocpi_open_enum! {
     }
 }
 
-ocpi_enum! {
+ocpi_lenient_enum! {
     /// The format of the connector: whether it is a socket or an attached cable.
     ///
     /// Spec: 2.3.0 §mod_locations_connectorformat_enum
@@ -1275,7 +1279,7 @@ ocpi_open_enum! {
     }
 }
 
-ocpi_enum! {
+ocpi_lenient_enum! {
     /// Categories of energy sources.
     ///
     /// Spec: 2.3.0 §mod_locations_energysourcecategory_enum
@@ -1311,7 +1315,7 @@ ocpi_open_enum! {
     }
 }
 
-ocpi_enum! {
+ocpi_lenient_enum! {
     /// The position of an EVSE relative to the EVSE's parking space. New in OCPI 2.3.0.
     ///
     /// Spec: 2.3.0 §mod_locations_evseposition_enum
@@ -1395,7 +1399,7 @@ ocpi_open_enum! {
     }
 }
 
-ocpi_enum! {
+ocpi_lenient_enum! {
     /// The direction in which parking occurs relative to the approach roadway. New in 2.3.0.
     ///
     /// Spec: 2.3.0 §mod_locations_parkingdirection_enum
@@ -1455,7 +1459,7 @@ ocpi_open_enum! {
     }
 }
 
-ocpi_enum! {
+ocpi_lenient_enum! {
     /// Whether a connector supplies AC or DC, and on how many phases.
     ///
     /// Spec: 2.3.0 §mod_locations_powertype_enum
@@ -1473,7 +1477,7 @@ ocpi_enum! {
     }
 }
 
-ocpi_enum! {
+ocpi_lenient_enum! {
     /// The status of an EVSE.
     ///
     /// > *An EVSE is never deleted; a removed EVSE gets `status` `REMOVED`.*
@@ -1530,6 +1534,33 @@ ocpi_open_enum! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `status` this version does not define keeps the object and reports the value.
+    ///
+    /// `Status` is closed in the specification, and a peer sending something else is
+    /// non-conformant — but refusing the *object* loses a whole page of Locations over one EVSE,
+    /// which is the trade this crate has already made for every other closed enum a peer fills
+    /// in. So the value survives in `Custom`, and `Validate` says it should not have been sent.
+    #[test]
+    fn an_undefined_status_is_kept_and_reported() {
+        let json = r#"{
+            "uid": "3256",
+            "status": "MAINTENANCE",
+            "connectors": [],
+            "last_updated": "2019-06-24T12:39:09Z"
+        }"#;
+        let evse: Evse = serde_json::from_str(json).expect("one odd value must not lose the page");
+        assert_eq!(evse.status.as_str(), "MAINTENANCE", "the wire value survives verbatim");
+
+        let violations = evse.validate().expect_err("and it is still not conformant");
+        let reported = violations.as_slice().iter().find(|v| v.pointer == "/status");
+        assert!(reported.is_some(), "the status is reported: {violations}");
+        assert!(reported.expect("just checked").message.contains("MAINTENANCE"));
+
+        // And it round-trips: a hub forwarding this EVSE does not damage it.
+        let back = serde_json::to_string(&evse).expect("serialises");
+        assert!(back.contains("\"MAINTENANCE\""), "{back}");
+    }
 
     fn geo() -> GeoLocation {
         GeoLocation::new("50.770774", "-126.104965").unwrap()

@@ -245,12 +245,12 @@ impl Transport {
             builder = builder.body(body.clone());
         }
 
-        let response = builder.send().await.map_err(|e| OcpiError::Transport(strip_url(&e.to_string())))?;
+        let response = builder.send().await.map_err(transport_error)?;
         let status = response.status();
         let headers = response.headers().clone();
         span.record("http.response.status_code", status.as_u16());
 
-        let bytes = response.bytes().await.map_err(|e| OcpiError::Transport(strip_url(&e.to_string())))?;
+        let bytes = response.bytes().await.map_err(transport_error)?;
 
         // The five HTTP statuses the specification does use, before the OCPI layer is reached.
         if !status.is_success() {
@@ -282,6 +282,17 @@ pub fn check_outgoing<T: Validate>(value: &T, config: &ClientConfig) -> Result<(
         return Ok(());
     }
     value.validate().map_err(OcpiError::Invalid)
+}
+
+/// Classifies a `reqwest` failure, keeping a timeout distinguishable from every other transport
+/// failure.
+///
+/// `reqwest` knows which it was; recovering that from the message string — which is what a hub
+/// would otherwise have to do to choose between `4002` and `4003` — is guesswork about another
+/// crate's formatting.
+fn transport_error(error: reqwest::Error) -> OcpiError {
+    let message = strip_url(&error.to_string());
+    if error.is_timeout() { OcpiError::Timeout(message) } else { OcpiError::Transport(message) }
 }
 
 /// A `reqwest` error message can contain the full URL, including a `response_url` that carries a

@@ -1,5 +1,6 @@
 ---
 source: tests/snapshots.rs
+assertion_line: 184
 expression: breakdown
 ---
 {
@@ -17,10 +18,13 @@ expression: breakdown
           "price": 2.4,
           "vat_percentage": 20,
           "cost": 0.48,
+          "tax": 0.096,
+          "tax_basis": "excluded",
           "applied": {
             "tariff_id": "14",
             "element_index": 0,
             "component_index": 0,
+            "reservation": false,
             "because": "at 2024-01-15 19:40 local (MONDAY), 0 kWh and 0s into the session"
           }
         }
@@ -39,10 +43,13 @@ expression: breakdown
           "price": 1,
           "vat_percentage": 20,
           "cost": 0.25,
+          "tax": 0.05,
+          "tax_basis": "excluded",
           "applied": {
             "tariff_id": "14",
             "element_index": 2,
             "component_index": 0,
+            "reservation": false,
             "because": "at 2024-01-15 19:52 local (MONDAY), 0 kWh and 720s into the session"
           }
         }
@@ -57,5 +64,6 @@ expression: breakdown
       "taxable": 0.73,
       "amount": 0.15
     }
-  ]
+  ],
+  "tax_basis": "excluded"
 }

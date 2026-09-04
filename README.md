@@ -66,16 +66,16 @@ language, leaves that translation to you.
 | Layer | Feature | What it gives you |
 |---|---|---|
 | `types` | *(always)* | `CiString`, `DateTime`, `Number`, `Url`, `Extensions`, RFC 6901 validation |
-| `v2_3_0` | `v2_3_0` | the OCPI 2.3.0 wire model — 59 objects, all modules |
+| `v2_3_0` | `v2_3_0` | the OCPI 2.3.0 core wire model — 58 objects, Invoice Reconciliation included |
 | `v2_2_1` | `v2_2_1` | the OCPI 2.2.1 wire model — 53 objects, as a delta from 2.3.0 |
 | `v2_1_1` | `v2_1_1` | the OCPI 2.1.1 wire model — 33 objects (legacy peers) |
-| `bookings` / `invoice-reconciliation` | same | the 2.3.0 `bookings` and `payments` release branches |
+| `bookings` / `payments` | same | the two OCPI 2.3.0 release branches, and the fields each adds to a core object |
 | `convert` | `convert` | `Upgrade`/`Downgrade` between versions, with loss accounting — and the JSON-level bridge the client, server and hub use |
 | `transport` | `transport` | envelope, status codes, headers, credentials tokens, pagination, routing, PATCH |
 | `client` | `client` | async client over `reqwest`, registration handshake, paginated crawls, a typed client per module — canonical objects whatever the peer runs |
 | `server` | `server` | `axum` router driven by one trait per module and interface; publish 2.2.1 and 2.3.0 from one set of handlers |
 | `hub` | `hub` | routing table, broadcast push, open routing, GET All, version bridging |
-| `tariffs` | `tariffs` | auditable pricing engine over CDRs and Sessions |
+| `tariffs` | `tariffs` | auditable pricing engine over CDRs and Sessions, a Tariff linter, and a CDR invoice check |
 | `testkit` | `testkit` | validated samples, in-memory stores with spec-accurate pagination, and `MockPeer` — a complete, conformant OCPI party to point a partner at |
 | conformance runner | `client` | drive a live peer through the spec's rules, read-only |
 | `schema` | `schema` | `JsonSchema` for every wire type |
@@ -188,6 +188,11 @@ let response = relayed.outcome?;
 // response.status_message: "version bridged with 1 loss(es): /help_phone: OCPI 2.2.1 has no …"
 ```
 
+A fan-out is concurrent and bounded (`Forwarder::with_concurrency`, default 16): a Broadcast Push
+to fifty platforms takes as long as the slowest one, not as long as fifty timeouts in a row. A
+timeout is `4002` because `reqwest` said it was a timeout, not because the message contained the
+word.
+
 A crossing with no conversions — anything involving 2.1.1 — is **refused** rather than relayed:
 handing a 2.1.1 object to a 2.3.0 party produces a document the receiver misreads rather than
 rejects. `Forwarder::on_unbridgeable(Unbridgeable::RelayVerbatim)` is there for a hub that is
@@ -208,6 +213,17 @@ billed for each dimension, what `step_size` did to it, which Tariff Element and 
 Component priced it, and why that element was selected. The arithmetic is exact. The parts the
 specification deliberately leaves open — rounding, and `step_size` itself, which OCPI 3.0 removes —
 are settings on `PricingPolicy`, not assumptions baked into the code.
+
+It reads **`tax_included`**, which decides what `quantity × price` even means:
+
+> *`price`: Price per unit for this dimension. This is including or excluding taxes according to
+> the `tax_included` field of the Tariff that this PriceComponent is contained in.*
+
+A tariff-inclusive price treated as a net one is billed with the tax added a second time — an
+overcharge of exactly the tax rate, on the ordinary North American tariff shape. Here the tax is
+split back out where a rate is named, and where none is — *"tax rates are not typically known
+beforehand to the CPO"* — the breakdown says so with a `TaxIncludedWithoutRate` note instead of
+presenting a gross figure as a net one.
 
 It also **audits the CDR it is pricing.** A Charging Period is a total, not a curve, so a period
 that outlasts the price component pricing it cannot be apportioned after the fact — and the
@@ -233,8 +249,45 @@ a pipeline step rather than something somebody reads. Notes carry a machine-read
 reconciliation run can count them rather than grep them.
 
 And the breakdown holds together as a document: the tax lines always sum to exactly
-`total_incl - total_excl`, including when a `min_price` or `max_price` moved the total, which is a
-property test rather than a hope.
+`total_incl - total_excl`, including when a `min_price` or `max_price` moved the total and under
+all three readings of `tax_included`, which is a property test rather than a hope.
+
+`verify_cdr` turns that into an invoice check. It compares the two totals and the per-dimension
+costs, *and* the CDR against **itself**: `total_energy` and `total_parking_time` against what its
+own Charging Periods add up to, and `total_time` against its own two timestamps — because
+`total_time` is the session's duration, not the `TIME` dimension. That second group needs no
+tariff and admits no interpretation, and it is what finds a malformed CDR whose total happens to
+come out right.
+
+```console
+$ ocpi price cdr.json --tariff tariff.json
+…
+energy_volume: the CDR says 41.2, its own Charging Periods add up to 40.7 (difference 0.5)
+```
+
+Where the specification's own attribution is not derivable — a `FLAT` fee beside parking or
+reserved time belongs to one of three fields that each claim it, and nothing says which — the
+comparison is **skipped** rather than reported as a disagreement this crate cannot adjudicate.
+
+## Linting a tariff
+
+`validate()` answers *"is this object conformant?"*. `lint()` answers the question that costs
+money: **does this tariff say what its author meant?**
+
+```console
+$ ocpi lint tariff.json
+[unreachable_element] /elements/1/price_components/0: element 0 prices ENERGY and its restrictions
+always match, so this Price Component can never apply. The unrestricted element is the fallback
+and belongs last
+```
+
+Fifteen findings, each with a JSON Pointer: an element made dead by a fallback placed before it, a
+`TIME` `step_size` that `PARKING_TIME` will always absorb, a restriction window that excludes
+everything, `min_kwh` above `max_kwh`, a VAT rate on a tariff that says no tax applies, a
+reservation element pricing a dimension a reservation cannot have. Every one of them decodes
+cleanly, validates cleanly, prices sessions — and bills something other than what was intended.
+
+It finds one in the specification's own `tariff_13` example.
 
 Ten of the specification's own worked examples are tests, and two more are snapshots — the
 `step_size` example rendered in full, next to the same session under the OCPI 3.0 policy that has
@@ -262,8 +315,11 @@ $ ocpi conformance https://cpo.example.com/ocpi/versions
 
 It checks discovery, the endpoint list, header echoing, clock skew, authentication, and one page
 from every Sender interface the peer offers — pagination headers, limits, `Link: rel="next"`, and
-whether the objects conform. Every check names the specification anchor behind it, so a failing
-line pastes straight into a ticket.
+whether the objects conform. It also checks two things a peer cannot see from its own side: that
+every URL it advertises is one a partner may actually call (a version-details document generated
+behind a reverse proxy publishes `http://10.0.0.5:8080/…` to the whole network, and every
+partner's SSRF guard declines it), and that a next link stays on the same host. Every check names
+the specification anchor behind it, so a failing line pastes straight into a ticket.
 
 Two checks are the reason to run it at all: whether the peer actually applies `offset`, and whether
 it applies `date_from`. Neither is visible in any single response, and both are expensive — one
@@ -283,6 +339,7 @@ $ ocpi versions https://cpo.example.com/ocpi/versions --token "$OCPI_TOKEN"
 $ ocpi pull locations https://cpo.example.com/ocpi/versions  # $OCPI_TOKEN, every page
 $ ocpi pull payment-terminals https://ptp.example.com/ocpi/versions
 $ ocpi price cdr.json --tariff tariff.json      # what it should have cost, and why
+$ ocpi lint tariff.json                         # legal, conformant, and still wrong
 $ ocpi convert --as cdr --from 2.2.1 --to 2.3.0 cdr.json
 $ ocpi conformance https://cpo.example.com/ocpi/versions   # read-only, exits non-zero on failure
 $ ocpi serve-mock                                # a conformant peer on :8080, for a partner to hit
@@ -302,30 +359,42 @@ source it implements, so a reviewer — or a partner's compliance team — can g
 straight to the sentence that defines it.
 
 That is checkable, not decorative. Repository automation compares the crate against the
-specification:
+specification — and **pins** the specification, because OCPI edits released branches in place:
 
 ```console
+$ cargo run -p xtask -- spec-sync --fetch       # the five pinned commits, exactly
+$ cargo run -p xtask -- spec-sync --check       # 479 files, verified against a lock
 $ cargo run -p xtask -- spec-coverage --check   # every object's fields vs the spec's property tables
 $ cargo run -p xtask -- enum-coverage --check   # every enum's values vs the spec's value tables
 $ cargo run -p xtask -- field-shapes --check    # every field's cardinality and length
+$ cargo run -p xtask -- endpoints --check       # the URLs we build vs the ones the spec writes
+$ cargo run -p xtask -- errata --check          # every recorded spec defect is still a defect
 $ cargo run -p xtask -- sync-fixtures           # re-import the spec's own JSON examples
 $ cargo run -p xtask -- no-floats               # the no-f64 guarantee
+$ cargo run -p xtask -- validate-coverage       # every field reaches the validator
 $ cargo run -p xtask -- dead-config             # every setting does something
 ```
 
-`dead-config` fails the build if a public field of `Quirks`, `ClientConfig`, `ServerConfig`,
-`PricingPolicy` or `UrlPolicy` is only ever *assigned* and never read, or shares a name with a field
-on another of them. A configuration field that does nothing is worse than a missing feature:
-somebody sets it, believes the problem is handled, and ships.
+CI runs every one of them on every push, against the pinned sources. Released branches are edited
+in place, without a version bump — a module can move between 2.3.0 core and a release branch under
+an unchanged version number — so a weekly job runs `spec-sync --latest` and fails when a pinned
+branch moves.
 
-`spec-coverage` checks five releases — 2.3.0, 2.2.1, 2.1.1 and the `bookings` and `payments`
-branches, 275 object comparisons — and all of them match the property tables exactly.
-`enum-coverage` checks the same five releases' 159 enums against their value tables, and
-`field-shapes` checks 1,385 field cardinalities and lengths. All of them match.
+The numbers, all matching: 274 object comparisons across five releases, 157 enums, 1,367 field
+cardinalities and lengths, 16 endpoint URL structures, 19 recorded specification defects, 728
+fields reaching the validator. An erratum that gets **fixed** upstream fails the build rather than
+leaving a false claim in the documentation.
+
+`dead-config` fails the build if a public field of `Quirks`, `ClientConfig`, `ServerConfig`,
+`PricingPolicy` or `UrlPolicy` is only ever *assigned* and never read. A configuration field that
+does nothing is worse than a missing feature: somebody sets it, believes the problem is handled,
+and ships.
 
 ## How it is verified
 
-* **Field census** against the specification's own property tables, as above.
+* **Field census** against the specification's own property tables, as above, plus a **validator
+  census**: every field of every wire object reaches `Validate`, or the object accepts a peer's
+  value without ever reporting it.
 * **Field-shape census** against the cardinality and length columns of the same tables. A field
   the spec marks optional and the crate makes required rejects a conformant peer's object; a length
   that is too small reports a conformant value as `TooLong` and, with outgoing validation on,
@@ -334,15 +403,27 @@ branches, 275 object comparisons — and all of them match the property tables e
   what may go in the field: a missing enum value stops a conformant peer's object decoding on a
   closed enum, and on an open one it survives in `Custom(_)`, fails nothing, and silently never
   matches the variant you wrote a `match` arm for.
-* **Round-trip of every example the specification ships** — all 218, across four corpora. Each
+* **Round-trip of every example the specification ships** — all 279, across five corpora. Each
   needs a recorded expectation, so a newly synced example cannot pass unexamined; where the spec's
   own example is wrong the reason is written down and the test asserts it *still* fails, so an
   upstream fix surfaces as a failure.
-* **Property tests** for the laws the rest of the crate relies on: `Eq`/`Hash`/`Ord` agreement on
+* **Property tests** for the laws the rest of the crate relies on — including the pricing
+  invariants under all three readings of `tax_included`: `Eq`/`Hash`/`Ord` agreement on
   case-insensitive identifiers, merge-patch idempotence, exact decimal arithmetic across the JSON
   boundary, conversion round-trips, well-formed JSON Pointers — and **panic-freedom** for every
   parser a peer controls the input of. There is no `unsafe` here, so a hostile peer's leverage is a
   panic; one inside a hub's forwarder kills a task holding somebody else's message.
+* **Fuzzing, seeded from the specification.** Six libFuzzer targets — the decoders, the merge
+  patch, the version bridge, the pricing engine, the headers — start from the 279 examples rather
+  than from nothing. `pricing` asserts the breakdown's own invariant, that the tax lines account
+  for exactly the difference between the two totals, on every input that decodes.
+* **Mutation testing** over the pricing engine, which is where the boundary tests come from: one
+  test per bound the specification calls *inclusive* or *exclusive*, each quoting the sentence it
+  is about, because only a session landing exactly on a bound tells `<` from `<=`.
+* **No silent drop, mechanically.** Every leaf of every 2.3.0 example that a downgrade does not
+  carry across to 2.2.1 has to be *named* in the loss report. A round-trip test cannot show this,
+  because going back always loses something; a new field modelled without a matching
+  `lossy.record` fails here instead.
 * **Mock peers that misbehave.** The end-to-end test proves client and server agree; `wiremock`
   peers prove the client survives partners that don't — an OCPI 3.0-only peer, pagination that
   points at itself forever, a `2003` inside a `200`, a 503 that must not be retried on a write.
@@ -360,7 +441,7 @@ branches, 275 object comparisons — and all of them match the property tables e
   they say nothing about whether what comes out is legible.
 * **The conformance runner pointed at our own server**, so the two keep each other honest.
 
-526 tests across twelve targets. Clippy at `pedantic` with `-D warnings` under three feature sets,
+574 tests across twelve targets. Clippy at `pedantic` with `-D warnings` under three feature sets,
 every feature and every pair of layer features compiled, `cargo deny`, and benchmarks for what the
 guarantees cost:
 
@@ -391,7 +472,7 @@ numbers](https://hupe1980.github.io/ocpi-kit/docs/reference/verification/#what-t
 ## Contributing
 
 Issues and pull requests are welcome. `cargo test --all-features`, `cargo clippy --all-targets
---all-features` and both `xtask` checks must pass; CI runs them plus a feature-combination sweep,
+--all-features` and the `xtask` checks must pass; CI runs them plus a feature-combination sweep,
 `cargo deny` and a docs build.
 
 ## License

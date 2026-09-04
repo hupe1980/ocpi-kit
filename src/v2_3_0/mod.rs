@@ -31,15 +31,15 @@
 //! * Objects that are more than a handful of fields have a compile-time-checked builder:
 //!   `Location::builder().country_code("NL")…build()`.
 //!
-//! Spec: <https://github.com/ocpi/ocpi>, `release-2.3.0-bugfixes`
+//! Spec: <https://github.com/ocpi/ocpi>, `2.3.0/release/core`
 
 pub mod cdrs;
 pub mod charging_profiles;
 pub mod commands;
 pub mod credentials;
 pub mod hub_client_info;
+pub mod invoice_reconciliation;
 pub mod locations;
-pub mod payments;
 pub mod sessions;
 pub mod tariffs;
 pub mod tokens;
@@ -50,20 +50,20 @@ pub mod versions;
 #[cfg_attr(docsrs, doc(cfg(feature = "bookings")))]
 pub mod bookings;
 
-#[cfg(feature = "invoice-reconciliation")]
-#[cfg_attr(docsrs, doc(cfg(feature = "invoice-reconciliation")))]
-pub mod invoice_reconciliation;
+#[cfg(feature = "payments")]
+#[cfg_attr(docsrs, doc(cfg(feature = "payments")))]
+pub mod payments;
 
 pub use cdrs::Cdr;
 pub use credentials::Credentials;
+pub use invoice_reconciliation::{InvoiceReconciliationRecord, Reconciliation, reconcile};
 pub use locations::{Connector, Evse, Location};
-pub use payments::{FinancialAdviceConfirmation, Terminal};
 
 #[cfg(feature = "bookings")]
 pub use bookings::{Booking, BookingLocation, Calendar};
 
-#[cfg(feature = "invoice-reconciliation")]
-pub use invoice_reconciliation::{InvoiceReconciliationRecord, Reconciliation, reconcile};
+#[cfg(feature = "payments")]
+pub use payments::{FinancialAdviceConfirmation, Terminal};
 pub use sessions::Session;
 pub use tariffs::Tariff;
 pub use tokens::Token;

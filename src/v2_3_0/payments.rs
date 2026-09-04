@@ -120,7 +120,7 @@ impl Terminal {
     /// > `authorization_reference`.*
     #[must_use]
     pub fn invoice_url(&self, authorization_reference: &str) -> Option<Url> {
-        self.invoice_base_url.as_ref().map(|base| base.join(authorization_reference))
+        self.invoice_base_url.as_ref().map(|base| base.join_segment(authorization_reference))
     }
 }
 

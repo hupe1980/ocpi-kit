@@ -21,6 +21,19 @@ struct-literal construction and exhaustive matching for a flexibility the domain
 behavioural enums this crate may itself extend — `Bridge`, `RoutingScenario`, `ViolationCode`,
 `Unbridgeable` — *are* `#[non_exhaustive]`.
 
+**An enum is decoded leniently unless a value of it drives a decision.** The pricing engine
+switches on every `TariffDimensionType`; the routing layer on every `InterfaceRole`; a caller
+branches on every `CommandResultType`; `DayOfWeek` is arithmetic. Those stay closed, and stay
+`Copy`. Everything a peer merely *fills in* — `Status`, `SessionStatus`, `AuthMethod`, `PowerType`,
+`ConnectorFormat`, `TariffType`, `WhitelistType` — decodes an unknown value into `Custom` and
+reports it, because losing a page of Locations over one EVSE's undefined status is worse than
+carrying it and saying so. See [Enums](@/docs/concepts/enums.md).
+
+**Every field of every wire object reaches the validator, and `xtask validate-coverage` checks
+that.** `Validate` is written by hand; a field added to a struct and not to its `validate_fields!`
+call is a rule this crate promises and does not keep. The check is type-driven — a `bool` carries
+no constraint, a `CiString` does.
+
 **The open-enum catch-all is `Custom`, not `Other`.** `ImageCategory` and `TokenType` each have a
 real spec value called `OTHER`. See [Open enums](@/docs/concepts/enums.md).
 
@@ -32,6 +45,15 @@ constructor could see.
 **`f64` → `Decimal` goes through the shortest round-tripping string.** `Decimal::try_from(f64)` is
 not exact; `f64::to_string` prints the decimal the peer actually wrote. See
 [Numbers](@/docs/concepts/numbers.md).
+
+**An identifier that goes into a URL is percent-encoded.** OCPI ids are `CiString(36)` with no
+character restriction, and they arrive from peers, so `Url::join_segment` encodes anything that
+would change the URL's structure. `Url::join` remains for an already-encoded path, which is what a
+hub forwards with. See [Security](@/docs/reference/security.md).
+
+**`DateTime::local_parts` is fallible.** Shifting a conformant timestamp near the end of the
+representable range by a Location's UTC offset overflows, and the alternative to an error is a
+panic in the middle of pricing a CDR somebody else wrote.
 
 **`time` is fully wrapped.** `types::DateTime` exposes no `time` type in its public API — the
 conversions to and from `OffsetDateTime` are crate-private — so the backend could be swapped for
@@ -75,6 +97,44 @@ about means the same thing in both. `ObjectKind::divergent_fields` is the list t
 routing headers and no `Price`, so carrying an object across that boundary is a decision about a
 particular deployment rather than a translation a library can make on its own.
 
+## Tariffs and tax
+
+**`tax_included` decides what `quantity × price` means, so the engine reads it.** `NO` adds the
+component's `vat` on top; `YES` takes the tax back **out** of the stated amount where a rate is
+named; `N/A` is a statement that there is no tax, and a `vat` beside it is a contradiction the
+Tariff-level field wins. Ignoring the field overcharges every tax-inclusive session by exactly the
+tax rate.
+
+**Where the prices include tax and nothing names a rate, both totals are the gross amount and a
+note says so.** That is the ordinary North American shape — *"tax rates are not typically known
+beforehand to the CPO"* — and the alternatives are to invent a rate or to present a gross figure
+as a net one. `CostBreakdown::tax_basis` and a `TaxIncludedWithoutRate` note are the honest
+answer; a CPO filling in a CDR supplies the split from its own accounting.
+
+**A segment carries the tax charged on it, rather than a percentage to recompute from.** On a
+tax-inclusive tariff the two are not the same number once rounding is involved, and the segment's
+is the one that adds up to what the price component states — which is the number the driver was
+quoted.
+
+**Only an element that carries a `reservation` restriction prices reserved time.** *"When this
+field is present, the TariffElement describes reservation costs."* An unrestricted fallback used
+to price it too, which contradicted the treatment of every other non-reservation element. Reserved
+time nothing prices is free, with a note — the specification's own answer for an unpriced
+dimension, and the one that does not bill a driver at a rate the CPO never published.
+
+**A quantity is rounded to a millionth of a unit before `step_size` is applied.** 35 minutes is
+0.58333…33 hours and `× 3600` is 2099.999…, which a bare ceiling bills as 36. A microsecond is not
+a unit anybody meters.
+
+**Input the arithmetic cannot hold is refused, not priced.** `rust_decimal` panics on overflow,
+and every quantity and price comes off a peer's document, so `PricingError::OutOfRange` names the
+value instead of taking down the run.
+
+**A Tariff linter is a separate question from validation.** `validate()` answers conformance;
+`lint()` answers whether the Tariff says what its author meant. Both are needed, and merging them
+would make one of the two answers unusable — a lint finding must not stop a conformant object
+being accepted.
+
 ## Server
 
 **A router refuses at start-up to publish a version it cannot write.** The handler traits speak
@@ -100,6 +160,22 @@ the implementation, and for Charging Profiles that freedom is the only thing tha
 two identically-shaped result bodies. See [Spec errata](@/docs/reference/errata.md).
 
 ## Hub
+
+**A bridging router refuses to serve both interfaces of a module without a receiver prefix.** The
+translating middleware sees a path rather than a route, so with both interfaces at the same shape
+it would have to guess which object a body is — and a wrong guess translates with the other
+interface's rules or skips the translation, neither of which fails visibly. This is wider than the
+route conflict `check_interface_conflict` catches, which is only about path arity.
+
+**A hub fans out concurrently, with a bound.** A Broadcast Push one platform at a time costs the
+sum of every partner's timeout while the sender waits; unbounded opens a socket per partner
+because somebody pushed one Location. `Forwarder::with_concurrency`, default 16, and the results
+keep the order the parties were given.
+
+**A timeout is a variant, not a substring.** A hub owes `4002` for a timeout and `4003` for a
+refused connection, and telling them apart by searching another crate's error message for the word
+"timeout" is not something a protocol implementation should do. `OcpiError::Timeout` comes from
+`reqwest::Error::is_timeout`.
 
 **A hub refuses a request whose headers and method match no routing scenario**, rather than picking
 the nearest one. `OcpiError::NotRoutable` carries the specification's own advice: omit the
@@ -138,6 +214,11 @@ peer it is checking cannot be run against production. See
 everybody, and each is a chance to get pagination or the ownership rule slightly wrong and then test
 against that mistake. Shipping it makes conformance *this* crate's job, which is testable. See
 [Testkit](@/docs/layers/testkit.md).
+
+**A poisoned lock is recovered from, not propagated.** The token store, the routing table and the
+testkit stores hold plain data with no invariant a panic could leave half-applied. Turning one
+panicking request into a process that answers every later request with a panic is a worse failure
+than the one that started it.
 
 **The no-float rule is enforced by `xtask`, not clippy**, and **a configuration field must be read,
 not merely assigned**. Both are explained under

@@ -20,7 +20,8 @@ You implement the traits; the router does the protocol.
 
 There is a trait — usually two, one per interface — for every module the crate models a protocol
 for: Credentials, Locations, Sessions, CDRs, Tariffs, Tokens, Commands, Charging Profiles,
-Payments and Hub Client Info. `/versions` and the version-details endpoint are generated, not
+Payments (with the `payments` feature) and Hub Client Info. `/versions` and the version-details
+endpoint are generated, not
 implemented.
 
 ## What the router takes care of

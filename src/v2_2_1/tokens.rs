@@ -101,7 +101,10 @@ impl Token {
                     AuthorizationDecision::AllowFromCache
                 }
             }
-            WhitelistType::Never => {
+            // A value this version does not define lands here too: it is reported by
+            // `Validate`, and until somebody acts on that report the safe reading is the
+            // strictest one the enum offers.
+            WhitelistType::Never | WhitelistType::Custom(_) => {
                 if online {
                     AuthorizationDecision::AuthorizeRealtime
                 } else {

@@ -53,10 +53,63 @@ pub struct PricedSegment {
     pub price: Number,
     /// The VAT percentage applied, if the price component named one.
     pub vat_percentage: Option<Number>,
-    /// The cost of this stretch, excluding VAT.
+    /// The cost of this stretch, **excluding** tax.
+    ///
+    /// When the Tariff says `tax_included: YES` this is the amount with the tax taken back out,
+    /// not the amount the price component states. [`tax_basis`](Self::tax_basis) says which.
     pub cost: Number,
+    /// The tax owed on [`cost`](Self::cost).
+    ///
+    /// Carried rather than recomputed from the percentage, because the two are not the same
+    /// number once rounding is involved: on a tax-inclusive tariff the tax is the difference
+    /// between the stated gross amount and the net one, so that `cost + tax` is exactly what the
+    /// price component said.
+    pub tax: Number,
+    /// Whether the price component this segment was billed at stated a gross or a net amount.
+    pub tax_basis: TaxBasis,
     /// Which Tariff Element priced it.
     pub applied: AppliedComponent,
+}
+
+/// Whether the amounts in a Tariff already contain the tax that is owed on them.
+///
+/// > *`tax_included`: Whether taxes are included in the amounts in this Tariff.*
+/// > *YES — Taxes are included in the prices in this Tariff. NO — Taxes are not included, and
+/// > will be added on top of the prices in this Tariff. N/A — No taxes are applicable to this
+/// > Tariff.*
+///
+/// This decides what `quantity × price` **means**, so an engine that ignores it overstates a
+/// tax-inclusive session by exactly the tax: it treats a gross amount as a net one and then adds
+/// the tax on top a second time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TaxBasis {
+    /// The prices are net; the tax named by each component is added on top. OCPI 2.2.1 has no
+    /// other reading, and it is what a 2.2.1 Tariff upgrades to.
+    Excluded,
+    /// The prices are gross. Where a component names a `vat`, the tax is taken back out of the
+    /// amount so that a breakdown still has both totals; where none does, the split is not
+    /// derivable and a [`TaxIncludedWithoutRate`](PricingNoteCode::TaxIncludedWithoutRate) note
+    /// says so.
+    Included,
+    /// The Tariff says no tax applies at all, so the two totals are the same number.
+    NotApplicable,
+    /// Different periods of one session were priced by Tariffs that disagree about this.
+    ///
+    /// Only ever produced for the breakdown as a whole; every individual segment has one basis.
+    Mixed,
+}
+
+impl fmt::Display for TaxBasis {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Excluded => "taxes excluded from the tariff's prices",
+            Self::Included => "taxes included in the tariff's prices",
+            Self::NotApplicable => "no taxes applicable",
+            Self::Mixed => "mixed: the tariffs disagree about whether prices include tax",
+        })
+    }
 }
 
 /// The exact Price Component that priced a segment.
@@ -71,6 +124,13 @@ pub struct AppliedComponent {
     pub element_index: usize,
     /// The index of the Price Component within that element's `price_components`.
     pub component_index: usize,
+    /// Whether this segment is **reserved** time rather than consumed time.
+    ///
+    /// OCPI has no reservation dimension — reserved time is priced as `TIME` by an element
+    /// carrying a `reservation` restriction — so without this the two are indistinguishable in
+    /// the audit trail, and a CDR's `total_reservation_cost` cannot be checked against anything.
+    #[serde(default)]
+    pub reservation: bool,
     /// Why this element was selected — which restrictions it satisfied — in words.
     pub because: String,
 }
@@ -156,6 +216,25 @@ pub enum PricingNoteCode {
     /// Raised when a `min_price.after_taxes` lifts the inclusive total of a session whose price
     /// components named no VAT at all. The amount is real; the rate is not knowable.
     UnattributedTax,
+    /// The Tariff's prices include tax, and no price component says at what rate.
+    ///
+    /// This is the ordinary North American shape — *"tax rates are not typically known
+    /// beforehand to the CPO, so the `vat` field in the PriceComponent objects is not filled"* —
+    /// and it means the two totals cannot be told apart from the Tariff alone. The engine reports
+    /// the amount as **both** totals and raises this, rather than inventing a rate or pretending
+    /// the gross figure is a net one.
+    TaxIncludedWithoutRate,
+    /// A price component named a `vat` percentage on a Tariff that says no tax applies.
+    ///
+    /// `tax_included: N/A` is a statement that there is no tax; a rate beside it is a
+    /// contradiction in the Tariff, and the engine follows the Tariff-level field because that is
+    /// the one the specification defines as governing.
+    TaxRateIgnored,
+    /// One session was priced by Tariffs that disagree about whether prices include tax.
+    ///
+    /// Legal — a CDR may name a different `tariff_id` per Charging Period — and worth a look,
+    /// because the two totals then mean something different for different parts of the session.
+    MixedTaxBasis,
 }
 
 impl PricingNoteCode {
@@ -169,6 +248,9 @@ impl PricingNoteCode {
             Self::TotalClamped => "total_clamped",
             Self::NegativeTax => "negative_tax",
             Self::UnattributedTax => "unattributed_tax",
+            Self::TaxIncludedWithoutRate => "tax_included_without_rate",
+            Self::TaxRateIgnored => "tax_rate_ignored",
+            Self::MixedTaxBasis => "mixed_tax_basis",
         }
     }
 }
@@ -243,6 +325,13 @@ pub struct CostBreakdown {
     pub total_incl_vat: Number,
     /// The VAT owed, grouped by percentage.
     pub taxes: Vec<TaxLine>,
+    /// Whether the tariff's prices already contained the tax.
+    ///
+    /// [`TaxBasis::Included`] with no rate anywhere means `total_excl_vat` is the **gross**
+    /// amount, because nothing in the tariff says how to split it; the accompanying
+    /// [`TaxIncludedWithoutRate`](PricingNoteCode::TaxIncludedWithoutRate) note is the signal not
+    /// to read it as a net figure.
+    pub tax_basis: TaxBasis,
     /// Whether a `min_price` or `max_price` changed the total.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit_applied: Option<PriceLimitApplied>,
@@ -297,8 +386,15 @@ impl CostBreakdown {
 
     /// The result as an OCPI 2.3.0 [`Price`](crate::v2_3_0::types::Price).
     ///
-    /// The VAT lines become [`TaxAmount`](crate::v2_3_0::types::TaxAmount)s named `VAT`, one per
-    /// distinct percentage, which is what a Tariff's per-component `vat` fields describe.
+    /// The tax lines become [`TaxAmount`](crate::v2_3_0::types::TaxAmount)s named `VAT`, one per
+    /// distinct percentage, which is what a Tariff's per-component `vat` fields describe. A line
+    /// the engine could not attribute to a rate keeps `percentage: None` and is named `TAX`,
+    /// since calling an unattributed amount VAT would be a claim the session does not support.
+    ///
+    /// **On a tax-inclusive tariff with no rate** ([`TaxBasis::Included`] plus a
+    /// [`TaxIncludedWithoutRate`](PricingNoteCode::TaxIncludedWithoutRate) note) `before_taxes`
+    /// is the gross amount, because that is the only number the data contains. A CPO filling in
+    /// a CDR from this has to supply the tax split from its own accounting.
     #[cfg(feature = "v2_3_0")]
     #[must_use]
     pub fn to_price_v2_3_0(&self) -> crate::v2_3_0::types::Price {
@@ -308,7 +404,11 @@ impl CostBreakdown {
                 .taxes
                 .iter()
                 .map(|t| crate::v2_3_0::types::TaxAmount {
-                    name: crate::types::OcpiText::new_lenient("VAT"),
+                    name: crate::types::OcpiText::new_lenient(if t.percentage.is_some() {
+                        "VAT"
+                    } else {
+                        "TAX"
+                    }),
                     account_number: None,
                     percentage: t.percentage,
                     amount: t.amount,

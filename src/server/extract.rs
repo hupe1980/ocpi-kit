@@ -193,23 +193,44 @@ where
             .await
             .map_err(|e| OcpiErrorResponse::new(OcpiError::Transport(e.body_text())).with_ids(ids.clone()))?;
 
-        // Distinguish "not JSON at all" (HTTP 400) from "not this object" (2001 in a 200).
-        if serde_json::from_slice::<serde::de::IgnoredAny>(&bytes).is_err() {
-            return Err(OcpiErrorResponse::new(OcpiError::MalformedJson(
-                "the request body is not valid JSON".to_owned(),
-            ))
-            .with_ids(ids));
-        }
-
+        // One parse, and `serde_json` says which kind of failure it was. Deserialising twice —
+        // once as `IgnoredAny` to classify and once for real — doubles the cost of every request
+        // on the largest bodies in the protocol, and a page of Locations is the largest body in
+        // the protocol.
         let mut de = serde_json::Deserializer::from_slice(&bytes);
-        serde_path_to_error::deserialize(&mut de).map(OcpiJson).map_err(|e| {
-            OcpiErrorResponse::new(OcpiError::Decode {
-                path: format!("/{}", e.path()),
-                message: e.into_inner().to_string(),
-            })
-            .with_ids(ids)
-        })
+        let value =
+            serde_path_to_error::deserialize(&mut de).map_err(|e| decode_rejection(e, &ids)).map(OcpiJson)?;
+        // `serde_path_to_error` stops at the end of the value it decoded, so trailing bytes are
+        // still to be refused: `{"a":1}garbage` is not a JSON document.
+        de.end().map_err(|e| {
+            OcpiErrorResponse::new(OcpiError::MalformedJson(e.to_string())).with_ids(ids.clone())
+        })?;
+        Ok(value)
     }
+}
+
+/// Turns a decode failure into the answer the specification prescribes for it.
+///
+/// > *The transport layer ends after a message is correctly parsed into a (semantically
+/// > unvalidated) JSON structure. When a message does not contain a valid JSON string, the HTTP
+/// > error `400 - Bad request` MUST be returned.*
+///
+/// So a **syntax** error is an HTTP 400 and a **data** error — valid JSON that is not this object
+/// — is a `2001` inside a `200`, with the JSON path to the value that did not fit.
+fn decode_rejection(
+    error: serde_path_to_error::Error<serde_json::Error>,
+    ids: &RequestIds,
+) -> OcpiErrorResponse {
+    use serde_json::error::Category;
+    let path = format!("/{}", error.path());
+    let inner = error.into_inner();
+    let response = match inner.classify() {
+        Category::Syntax | Category::Eof | Category::Io => {
+            OcpiErrorResponse::new(OcpiError::MalformedJson(inner.to_string()))
+        }
+        Category::Data => OcpiErrorResponse::new(OcpiError::Decode { path, message: inner.to_string() }),
+    };
+    response.with_ids(ids.clone())
 }
 
 /// A JSON Merge Patch body.

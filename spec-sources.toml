@@ -1,0 +1,52 @@
+# The OCPI specification releases this crate is written against.
+#
+# The specification itself is **not** vendored: OCPI is published under CC BY-ND 4.0, so
+# `specs/src/` is a local checkout and is git-ignored. What is committed is this manifest — which
+# release, which branch, which commit — and `spec-sources.lock`, a SHA-256 of every file the
+# censuses read.
+#
+#   cargo run -p xtask -- spec-sync --fetch    # materialise exactly these commits
+#   cargo run -p xtask -- spec-sync --check    # is the checkout the one we were written against?
+#   cargo run -p xtask -- spec-sync --latest   # has upstream edited the branch since?
+#
+# Why a pin at all: the OCPI repository edits released branches **in place**. In July 2026 it
+# restructured 2.3.0 — moving the Payments module and `Tariff.preauthorize_amount` out of core
+# onto a release branch, and moving Invoice Reconciliation into core — with no version bump. A
+# crate written against the previous layout still compiles and still passes its tests; it is
+# simply wrong about which release defines what. Nothing but a pin and a scheduled `--latest`
+# notices that.
+
+[[release]]
+name = "ocpi-2.3.0"
+label = "OCPI 2.3.0 core"
+repo = "https://github.com/ocpi/ocpi.git"
+branch = "2.3.0/release/core"
+commit = "3979887793d934cdc64e2ca2c78b89cbbf79d56f"
+
+[[release]]
+name = "ocpi-2.3.0-payments"
+label = "OCPI 2.3.0 payments release branch"
+repo = "https://github.com/ocpi/ocpi.git"
+branch = "2.3.0/release/payments"
+commit = "774e23a925c158481cd8cc9f8fc6824c1b11eaae"
+
+[[release]]
+name = "ocpi-2.3.0-bookings"
+label = "OCPI 2.3.0 bookings release branch"
+repo = "https://github.com/ocpi/ocpi.git"
+branch = "2.3.0/release/bookings"
+commit = "6ad981f428eac2f2f5ebfabe68f85d9d9675e021"
+
+[[release]]
+name = "ocpi-2.2.1"
+label = "OCPI 2.2.1, bugfix branch (2.2.1-d2 semantics)"
+repo = "https://github.com/ocpi/ocpi.git"
+branch = "release-2.2.1-bugfixes"
+commit = "ca8c04c5c8cc10ad1be2a82f61b19377d98e2a67"
+
+[[release]]
+name = "ocpi-2.1.1"
+label = "OCPI 2.1.1, bugfix branch"
+repo = "https://github.com/ocpi/ocpi.git"
+branch = "release-2.1.1-bugfixes"
+commit = "28ea45329a50c3dbfd790505b97860854db1d4a6"

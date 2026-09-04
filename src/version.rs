@@ -259,8 +259,12 @@ impl ModuleId {
         // and under others they do not, so the arms must stay separate.
         #[allow(clippy::match_like_matches_macro)]
         match self {
+            // The two release branches of OCPI 2.3.0, each behind the feature that models it.
             Self::Booking => cfg!(feature = "bookings"),
-            Self::InvoiceReconciliation => cfg!(feature = "invoice-reconciliation"),
+            Self::Payments => cfg!(feature = "payments"),
+            // Invoice Reconciliation is part of 2.3.0 core, so it needs no feature of its own:
+            // a build with the 2.3.0 model has it.
+            Self::InvoiceReconciliation => cfg!(feature = "v2_3_0"),
             Self::Custom(_) => false,
             _ => cfg!(any(feature = "v2_3_0", feature = "v2_2_1", feature = "v2_1_1")),
         }

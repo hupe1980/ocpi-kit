@@ -618,7 +618,9 @@ pub trait ChargingProfilesSender: Send + Sync + 'static {
 /// and the CPO drives them, which is why activation and location assignment are writes *on this
 /// interface* rather than pushes to the CPO.
 ///
-/// Spec: 2.3.0 §mod_payments_ptp_interface
+/// Spec: 2.3.0 payments branch §mod_payments_ptp_interface
+#[cfg(feature = "payments")]
+#[cfg_attr(docsrs, doc(cfg(feature = "payments")))]
 pub trait PaymentsSender: Send + Sync + 'static {
     /// `GET {payments}/terminals` — one page of Terminals.
     fn terminals(
@@ -697,7 +699,9 @@ pub trait PaymentsSender: Send + Sync + 'static {
 ///
 /// > *The POST should be used by the PTP to create a newly shipped terminal on the CPO's system.*
 ///
-/// Spec: 2.3.0 §mod_payments_cpo_interface
+/// Spec: 2.3.0 payments branch §mod_payments_cpo_interface
+#[cfg(feature = "payments")]
+#[cfg_attr(docsrs, doc(cfg(feature = "payments")))]
 pub trait PaymentsReceiver: Send + Sync + 'static {
     /// `GET {payments}/terminals/{terminal_id}` — what the CPO has stored.
     fn terminal(

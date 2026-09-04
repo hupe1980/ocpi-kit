@@ -44,7 +44,9 @@ pub use number::{InvalidNumber, Number};
 pub use open_enum::UnknownVariant;
 pub use string::OcpiString;
 pub use text::{InvalidString, StringKind};
-pub use url::{InvalidUrl, URL_MAX_LEN, Url, UrlPolicy, UrlRefused};
+pub use url::{
+    InvalidUrl, URL_MAX_LEN, Url, UrlPolicy, UrlRefused, encode_path_segment, encode_query_component,
+};
 pub use validate::{Validate, Validator, Violation, ViolationCode, Violations};
 
 #[doc(hidden)]

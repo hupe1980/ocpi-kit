@@ -69,23 +69,28 @@ impl std::error::Error for UnknownVariant {}
 
 /// Defines a **closed** OCPI `enum`: a fixed set of strings, where anything else is an error.
 ///
+/// Use it where a value *drives a decision* — the pricing engine's dimensions, a routing role, the
+/// outcome of a command — because an unrecognised value there has no meaning to act on. Where the
+/// value is only carried, [`ocpi_lenient_enum!`](crate::ocpi_lenient_enum) keeps it instead of
+/// losing the object around it.
+///
 /// ```
 /// use ocpi_kit::ocpi_enum;
 ///
 /// ocpi_enum! {
-///     /// The format of the connector, whether it is a socket or a plug.
+///     /// The unit a charging rate limit is expressed in.
 ///     ///
-///     /// Spec: 2.3.0 §mod_locations_connectorformat_enum
-///     pub enum ConnectorFormat {
-///         /// The connector is a socket; the EV user needs to bring a fitting plug.
-///         Socket = "SOCKET",
-///         /// The connector is an attached cable.
-///         Cable = "CABLE",
+///     /// Spec: 2.3.0 §mod_charging_profiles_chargingrateunit_enum
+///     pub enum ChargingRateUnit {
+///         /// Watts.
+///         W = "W",
+///         /// Amperes per phase.
+///         A = "A",
 ///     }
 /// }
 ///
-/// assert_eq!(ConnectorFormat::Socket.as_str(), "SOCKET");
-/// assert!("SCREW".parse::<ConnectorFormat>().is_err());
+/// assert_eq!(ChargingRateUnit::W.as_str(), "W");
+/// assert!("KW".parse::<ChargingRateUnit>().is_err());
 /// ```
 ///
 /// Attributes that document the enum — `#[cfg_attr(docsrs, doc(cfg(…)))]` above all — go **inside**

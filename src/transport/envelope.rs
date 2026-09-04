@@ -220,9 +220,21 @@ pub enum OcpiError {
     #[error("method not allowed: {0}")]
     MethodNotAllowed(String),
 
-    /// The transport failed: connection refused, TLS failure, timeout, non-JSON body.
+    /// The transport failed: connection refused, TLS failure, non-JSON body.
+    ///
+    /// A **timeout** is [`OcpiError::Timeout`] instead, because a hub has to answer the two
+    /// differently and telling them apart by reading the message is not something a protocol
+    /// implementation should be doing.
     #[error("transport error: {0}")]
     Transport(String),
+
+    /// The peer did not answer within the configured timeout.
+    ///
+    /// A hub turns this into `4002 Timeout on forwarded request`, which is the code that exists
+    /// precisely for it — and the reason this is a variant of its own rather than a
+    /// [`Transport`](Self::Transport) whose message happens to contain the word.
+    #[error("timed out: {0}")]
+    Timeout(String),
 
     /// A hub was asked to route a request whose headers and method do not describe any of the
     /// scenarios the specification defines.
@@ -270,7 +282,9 @@ impl OcpiError {
             | Self::TokenAOutOfScope
             | Self::NotFound(_)
             | Self::MethodNotAllowed(_) => StatusCode::CLIENT_ERROR,
-            Self::Transport(_) | Self::UrlRefused { .. } | Self::Unsupported(_) => StatusCode::SERVER_ERROR,
+            Self::Transport(_) | Self::Timeout(_) | Self::UrlRefused { .. } | Self::Unsupported(_) => {
+                StatusCode::SERVER_ERROR
+            }
         }
     }
 
@@ -314,7 +328,7 @@ impl OcpiError {
     #[must_use]
     pub fn is_transient(&self) -> bool {
         match self {
-            Self::Transport(_) => true,
+            Self::Transport(_) | Self::Timeout(_) => true,
             Self::Remote { status_code, .. } => {
                 matches!(status_code.class(), StatusClass::ServerError | StatusClass::HubError)
             }

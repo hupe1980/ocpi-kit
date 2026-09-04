@@ -8,3 +8,7 @@ description = "Repository automation for ocpi-kit: fixture sync and spec coverag
 [dependencies]
 regex = "1.13.1"
 serde_json = "1.0.151"
+
+# `endpoints` compares the URLs this crate *builds* with the structures the specification
+# *writes*, so it needs the builders themselves. Every other task reads source text.
+ocpi-kit = { path = "..", default-features = false, features = ["transport", "v2_3_0", "payments"] }

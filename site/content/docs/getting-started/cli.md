@@ -57,14 +57,35 @@ See [Spec errata](@/docs/reference/errata.md).
 $ ocpi price cdr.json --tariff tariff.json --time-zone Europe/Berlin
 ```
 
-Prices the CDR against the given Tariffs and prints the auditable breakdown, then compares the
-total with the one the CDR itself claims — the invoice check, in one command. `--tariff` may be
-given several times. `--no-step-size` bills measured quantities exactly, as OCPI 3.0 will.
+Prices the CDR against the given Tariffs and prints the auditable breakdown, then every figure the
+CDR claims: the two totals, the five per-dimension costs, and its own `total_energy`,
+`total_time` and `total_parking_time` against what its Charging Periods actually add up to. The
+invoice check, in one command. `--tariff` may be given several times. `--no-step-size` bills
+measured quantities exactly, as OCPI 3.0 will.
 
 **It exits non-zero when the CDR does not check out**, so this is a pipeline step rather than
 something a person has to read. A note is enough on its own: a CDR whose Charging Periods span a
 price change can total correctly by luck and still be malformed, and the breakdown says which
 period and which dimension. See [Tariffs](@/docs/layers/tariffs.md).
+
+## `lint` — is this Tariff what its author meant?
+
+```console
+$ ocpi lint tariff.json
+[unreachable_element] /elements/1/price_components/0: element 0 prices ENERGY and its
+restrictions always match, so this Price Component can never apply. …
+
+1 finding(s)
+```
+
+`validate` answers whether a Tariff conforms. This answers the question that costs money: an
+element made unreachable by a fallback placed before it, a `step_size` that `PARKING_TIME` will
+always absorb, a restriction window that excludes everything, a VAT rate on a tariff that says no
+tax applies. Every finding decodes, validates and prices sessions — and bills something other than
+what was written down.
+
+`--json` for a pipeline. **Exits non-zero when there are findings**, so tariff publishing can be
+gated on it. See [Tariffs](@/docs/layers/tariffs.md).
 
 ## `convert` — move an object between versions
 

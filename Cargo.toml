@@ -6,7 +6,7 @@ default-members = ["."]
 
 [package]
 name = "ocpi-kit"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.96"
 description = "OCPI (Open Charge Point Interface) toolkit for EV roaming: spec-exact typed models for OCPI 2.3.0 / 2.2.1 / 2.1.1, transport envelope, client, server and hub building blocks, and an auditable tariff engine."
@@ -17,7 +17,7 @@ documentation = "https://docs.rs/ocpi-kit"
 readme = "README.md"
 keywords = ["ocpi", "ev", "charging", "roaming", "emobility"]
 categories = ["network-programming", "web-programming", "api-bindings"]
-exclude = ["/specs", "/.github", "/site", "/xtask"]
+exclude = ["/specs", "/.github", "/site", "/xtask", "/fuzz", "/concepts"]
 
 [lib]
 name = "ocpi_kit"
@@ -93,8 +93,12 @@ v2_2_1 = ["v2_3_0"]
 v2_1_1 = ["v2_3_0"]
 ## Bookings extension module of the OCPI 2.3.0 `bookings` release branch.
 bookings = ["v2_3_0"]
-## Invoice Reconciliation extension module of the OCPI 2.3.0 `payments` release branch.
-invoice-reconciliation = ["v2_3_0"]
+## Payments module of the OCPI 2.3.0 `payments` release branch.
+##
+## Payments is not part of OCPI 2.3.0 core: the branch defines the module and the
+## `Tariff.preauthorize_amount` field it adds to a core object — the same shape as `bookings`.
+## Invoice Reconciliation is core, so it needs no feature of its own.
+payments = ["v2_3_0"]
 
 # ---- layers ------------------------------------------------------------
 ## Envelope, headers, credentials tokens, pagination, routing, URL builders, PATCH.
@@ -150,7 +154,7 @@ full = [
     "v2_2_1",
     "v2_3_0",
     "bookings",
-    "invoice-reconciliation",
+    "payments",
     "transport",
     "client",
     "server",
@@ -178,7 +182,7 @@ required-features = ["client", "server", "testkit"]
 
 [[test]]
 name = "modules"
-required-features = ["client", "server", "testkit"]
+required-features = ["client", "server", "testkit", "payments"]
 
 [[test]]
 name = "hub"

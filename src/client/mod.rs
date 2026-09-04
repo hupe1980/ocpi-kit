@@ -58,10 +58,13 @@ mod resync;
 
 pub use conformance::{Check, Conformance, Outcome, Report};
 pub use http::{OcpiRequest, Transport, check_outgoing};
+#[cfg(feature = "payments")]
+#[cfg_attr(docsrs, doc(cfg(feature = "payments")))]
+pub use modules::PaymentsClient;
 pub use modules::{
     CdrsClient, ChargingProfilesClient, CommandsClient, HubClientInfoClient, LocationsReceiver,
-    LocationsSender, ModuleClient, PaymentsClient, SessionsReceiver, SessionsSender, TariffsReceiver,
-    TariffsSender, TokensReceiver, TokensSender, correlated_ids,
+    LocationsSender, ModuleClient, SessionsReceiver, SessionsSender, TariffsReceiver, TariffsSender,
+    TokensReceiver, TokensSender, correlated_ids,
 };
 pub use paging::{DEFAULT_MAX_PAGES, PageStream};
 pub use peer::{Peer, PeerBuilder};

@@ -34,8 +34,13 @@ OCPI is organised into modules, each a REST resource with its own endpoint:
 
 `credentials` and `versions` are the configuration modules — how two parties meet. `locations`,
 `sessions`, `cdrs`, `tariffs`, `tokens`, `commands`, `chargingprofiles` and `hubclientinfo` are the
-functional modules that carry the actual traffic. OCPI 2.3.0 adds `payments`, and its release
-branches add bookings and invoice reconciliation.
+functional modules that carry the actual traffic. OCPI 2.3.0 core adds `invoicereconciliation`,
+and its two **release branches** add `payments` and `Booking`.
+
+A release branch is not a separate protocol: it is core plus one module, plus the fields that
+module adds to core objects. This crate has one cargo feature per branch, and which release defines
+what is [checked against pinned sources](@/docs/reference/traceability.md) rather than remembered —
+the branches do move.
 
 ## Sender and Receiver
 
@@ -104,7 +109,8 @@ get an HTTP error status at all. See [Transport](@/docs/layers/transport.md).
 
 ## Versions in the wild
 
-**2.2.1** is what most production traffic speaks today. **2.3.0** is current, adding Payments,
+**2.2.1** is what most production traffic speaks today. **2.3.0** is current, adding Payments (on
+its own release branch),
 richer parking and tax modelling. **2.1.1** is legacy but still deployed, and differs enough to
 need its own model. 3.0 is an unreleased draft.
 

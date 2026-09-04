@@ -373,7 +373,7 @@ impl CdrsReceiver for MockPeer {
                 status_message: Some(format!("CDR {} has already been received", cdr.id)),
             });
         }
-        let url = self.endpoint("cdrs").join(cdr.id.as_str());
+        let url = self.endpoint("cdrs").join_segment(cdr.id.as_str());
         self.cdrs.put(cdr);
         Ok(url)
     }

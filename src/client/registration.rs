@@ -106,13 +106,36 @@ impl Discovered {
         &self.versions
     }
 
-    /// The newest version both sides can speak.
+    /// The newest version both sides can speak **and** the typed client can use.
+    ///
+    /// Two questions hide behind "common version", and answering the wrong one produces a peer
+    /// that registers and then fails every call:
+    ///
+    /// * [`VersionNumber::is_supported`] asks whether this build has a *wire model* for a
+    ///   version. OCPI 2.1.1 passes.
+    /// * [`bridgeable`](crate::convert::wire::bridgeable) asks whether a document can be carried
+    ///   between that version and the canonical model the typed module clients speak. OCPI 2.1.1
+    ///   does **not** — it has no owner fields, no routing headers and no `Price`, so the
+    ///   crossing is a deployment decision rather than a translation.
+    ///
+    /// So a bridgeable version always wins, even over a newer one that is merely modelled. When
+    /// nothing bridges, the newest modelled version is still returned — the raw
+    /// [`ModuleClient`](super::ModuleClient) calls work against it — and
+    /// [`select_best`](Self::select_best) logs what that costs.
     #[must_use]
     pub fn best_common_version(&self) -> Option<&Version> {
-        self.versions
-            .iter()
-            .filter(|v| v.version.is_supported())
-            .max_by(|a, b| a.version.cmp_by_release(&b.version))
+        let usable = |v: &&Version| {
+            v.version.is_supported()
+                && crate::convert::wire::bridgeable(&v.version, &crate::CANONICAL_VERSION)
+        };
+        self.versions.iter().filter(usable).max_by(|a, b| a.version.cmp_by_release(&b.version)).or_else(
+            || {
+                self.versions
+                    .iter()
+                    .filter(|v| v.version.is_supported())
+                    .max_by(|a, b| a.version.cmp_by_release(&b.version))
+            },
+        )
     }
 
     /// `GET` the details of the newest version both sides support.
@@ -122,15 +145,26 @@ impl Discovered {
     /// Returns [`OcpiError::Remote`] with `3002 Unsupported version` when there is no version in
     /// common — which is exactly the code the specification reserves for it.
     pub async fn select_best(self, transport: &Transport) -> Result<Selected, OcpiError> {
-        let chosen =
-            self.best_common_version().map(|v| v.version.clone()).ok_or_else(|| OcpiError::Remote {
-                status_code: crate::transport::StatusCode::UNSUPPORTED_VERSION,
-                status_message: Some(format!(
-                    "peer supports {}, this build supports {}",
-                    self.versions.iter().map(|v| v.version.to_string()).collect::<Vec<_>>().join(", "),
-                    VersionNumber::supported().iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
-                )),
-            })?;
+        let chosen = self.best_common_version().map(|v| v.version.clone());
+        if let Some(version) = chosen.as_ref()
+            && !crate::convert::wire::bridgeable(version, &crate::CANONICAL_VERSION)
+        {
+            tracing::warn!(
+                ocpi.peer_version = %version,
+                "the only version in common is one this build cannot translate to OCPI {}; the \
+                 typed module clients will refuse every call against this peer, and only the raw \
+                 ModuleClient methods are usable",
+                crate::CANONICAL_VERSION,
+            );
+        }
+        let chosen = chosen.ok_or_else(|| OcpiError::Remote {
+            status_code: crate::transport::StatusCode::UNSUPPORTED_VERSION,
+            status_message: Some(format!(
+                "peer supports {}, this build supports {}",
+                self.versions.iter().map(|v| v.version.to_string()).collect::<Vec<_>>().join(", "),
+                VersionNumber::supported().iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+            )),
+        })?;
         self.select(transport, &chosen).await
     }
 

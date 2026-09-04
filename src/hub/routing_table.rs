@@ -1,4 +1,8 @@
 //! Which platform hosts which party, and whether it is reachable.
+//!
+//! Locks are taken poison-tolerantly: the table is plain data, and a hub that answered every
+//! request with a panic because one earlier request panicked would be a worse failure than the
+//! one that started it. See [`server::auth`](crate::server::auth).
 
 use std::collections::BTreeMap;
 use std::sync::RwLock;
@@ -78,18 +82,22 @@ impl RoutingTable {
     pub fn upsert(&self, platform: ConnectedPlatform) {
         self.platforms
             .write()
-            .expect("routing table lock poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(platform.platform_id.clone(), platform);
     }
 
     /// Removes a platform, as an unregistration does.
     pub fn remove(&self, platform_id: &str) -> bool {
-        self.platforms.write().expect("routing table lock poisoned").remove(platform_id).is_some()
+        self.platforms
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(platform_id)
+            .is_some()
     }
 
     /// Records a platform's connection status, which the `hubclientinfo` module publishes.
     pub fn set_status(&self, platform_id: &str, status: ConnectionStatus) -> bool {
-        let mut platforms = self.platforms.write().expect("routing table lock poisoned");
+        let mut platforms = self.platforms.write().unwrap_or_else(std::sync::PoisonError::into_inner);
         match platforms.get_mut(platform_id) {
             Some(platform) => {
                 platform.status = status;
@@ -110,7 +118,7 @@ impl RoutingTable {
         party: &PartyRef,
         f: impl FnOnce(&ConnectedPlatform) -> T,
     ) -> Result<T, OcpiError> {
-        let platforms = self.platforms.read().expect("routing table lock poisoned");
+        let platforms = self.platforms.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         let platform = platforms.values().find(|p| p.hosts(party)).ok_or_else(|| OcpiError::Remote {
             status_code: StatusCode::UNKNOWN_RECEIVER,
             status_message: Some(format!("the hub does not know {party}")),
@@ -127,7 +135,11 @@ impl RoutingTable {
     /// Whether the hub knows `party` at all, connected or not.
     #[must_use]
     pub fn knows(&self, party: &PartyRef) -> bool {
-        self.platforms.read().expect("routing table lock poisoned").values().any(|p| p.hosts(party))
+        self.platforms
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .any(|p| p.hosts(party))
     }
 
     /// The platform id hosting `party`.
@@ -135,7 +147,7 @@ impl RoutingTable {
     pub fn platform_of(&self, party: &PartyRef) -> Option<String> {
         self.platforms
             .read()
-            .expect("routing table lock poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .values()
             .find(|p| p.hosts(party))
             .map(|p| p.platform_id.clone())
@@ -159,7 +171,7 @@ impl RoutingTable {
         sender_role: Role,
         module: &ModuleId,
     ) -> Vec<(String, PartyRef)> {
-        let platforms = self.platforms.read().expect("routing table lock poisoned");
+        let platforms = self.platforms.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut targets = Vec::new();
         for platform in platforms.values() {
             if !platform.is_reachable() || !platform.implements(module, InterfaceRole::Receiver) {
@@ -185,7 +197,7 @@ impl RoutingTable {
     /// Spec: 2.3.0 §transport_and_format_get_all_via_hubs
     #[must_use]
     pub fn get_all_sources(&self, requester: &PartyRef, module: &ModuleId) -> Vec<(String, PartyRef)> {
-        let platforms = self.platforms.read().expect("routing table lock poisoned");
+        let platforms = self.platforms.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut sources = Vec::new();
         for platform in platforms.values() {
             if !platform.is_reachable() || !platform.implements(module, InterfaceRole::Sender) {
@@ -203,7 +215,7 @@ impl RoutingTable {
     /// Every platform the hub knows, connected or not.
     #[must_use]
     pub fn platform_ids(&self) -> Vec<String> {
-        self.platforms.read().expect("routing table lock poisoned").keys().cloned().collect()
+        self.platforms.read().unwrap_or_else(std::sync::PoisonError::into_inner).keys().cloned().collect()
     }
 
     /// Every party the hub knows, with its role and connection status.
@@ -211,10 +223,10 @@ impl RoutingTable {
     /// This is what the `hubclientinfo` module publishes.
     #[must_use]
     pub fn client_info(&self) -> Vec<(PartyRef, Role, ConnectionStatus)> {
-        let platforms = self.platforms.read().expect("routing table lock poisoned");
+        let platforms = self.platforms.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         platforms
             .values()
-            .flat_map(|p| p.parties.iter().map(move |(party, role)| (party.clone(), *role, p.status)))
+            .flat_map(|p| p.parties.iter().map(move |(party, role)| (party.clone(), *role, p.status.clone())))
             .collect()
     }
 }

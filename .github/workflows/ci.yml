@@ -79,22 +79,36 @@ jobs:
       # Every public configuration field must be read somewhere, not merely assigned. A setting
       # that does nothing is a promise the crate does not keep.
       - run: cargo run -p xtask -- dead-config
-      # Every object's fields must still match the specification's own property tables, and
-      # every enum's values must still match its value table, and every field's cardinality and
-      # length must still match its row. A missing enum value makes a conformant peer's object
+      # The specification is not vendored — OCPI is CC BY-ND 4.0 — so CI fetches exactly the
+      # commits `spec-sources.toml` pins and verifies every file against `spec-sources.lock`
+      # before reading a word of it. Until this existed the three censuses below were skipped on
+      # every run, which made a green badge say nothing at all about spec coverage.
+      - name: fetch the pinned specification
+        run: cargo run -p xtask -- spec-sync --fetch
+      - name: the checkout is the one this crate was written against
+        run: cargo run -p xtask -- spec-sync --check
+      # Every object's fields must still match the specification's own property tables, every
+      # enum's values must still match its value table, and every field's cardinality and length
+      # must still match its row. A missing enum value makes a conformant peer's object
       # undecodable; a length that is too small reports a conformant value as TooLong and, with
-      # outgoing validation on, refuses to send it. This
-      # needs a checkout of the OCPI sources under specs/src/, which the repository does not
-      # vendor (the specification is CC BY-ND); see site/content/docs/reference/traceability.md.
+      # outgoing validation on, refuses to send it.
       - name: spec coverage
         run: |
-          if [ -d specs/src ]; then
-            cargo run -p xtask -- spec-coverage --check
-            cargo run -p xtask -- enum-coverage --check
-            cargo run -p xtask -- field-shapes --check
-          else
-            echo "::notice::specs/src/ is not present; run 'cargo run -p xtask -- spec-coverage --check' and 'enum-coverage --check' locally against an OCPI checkout"
-          fi
+          cargo run -p xtask -- spec-coverage --check
+          cargo run -p xtask -- enum-coverage --check
+          cargo run -p xtask -- field-shapes --check
+      # Every recorded specification defect must still be a defect. An erratum upstream fixes
+      # turns a documented workaround into a false claim, and nothing else would notice.
+      - name: errata still reproduce
+        run: cargo run -p xtask -- errata --check
+      # And the URLs this crate builds must still be the ones the specification writes. A URL is
+      # where an OCPI integration actually breaks, and no census compares one.
+      - name: endpoint URLs
+        run: cargo run -p xtask -- endpoints --check
+      # Every field of every wire object must reach `Validate`. One that does not is a rule this
+      # crate promises and does not keep, and nothing else notices.
+      - name: validator coverage
+        run: cargo run -p xtask -- validate-coverage --check
 
   msrv:
     name: MSRV

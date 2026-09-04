@@ -141,9 +141,15 @@ impl Quantisation {
         }
         let scale = Number::from(unit_scale);
         let step = Number::from(step_size);
-        let in_units = quantity * scale;
-        let blocks = (in_units / step).get().ceil();
-        Number::new(blocks) * step / scale
+        // Rounded to a millionth of a unit — a microsecond, a microwatt-hour — before the ceiling
+        // is taken. A quantity that reached here as a repeating decimal (35 minutes is
+        // 0.58333…33 h, and 0.58333…33 × 3600 is 2099.99…) would otherwise sit a
+        // twenty-eighth-of-a-digit below its own block boundary and be rounded up into the next
+        // block: a driver billed for 40 minutes of parking because 35 does not divide by 3.
+        let in_units = quantity.checked_mul(scale).unwrap_or(quantity).round_dp(6);
+        let Some(blocks) = in_units.checked_div(step) else { return quantity };
+        let billed = Number::new(blocks.get().ceil()).checked_mul(step).and_then(|v| v.checked_div(scale));
+        billed.unwrap_or(quantity)
     }
 }
 

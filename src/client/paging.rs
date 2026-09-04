@@ -52,7 +52,6 @@ pub struct PageStream<'a, T> {
     next: Option<Url>,
     buffer: VecDeque<T>,
     last_total: Option<u64>,
-    last_offset: u64,
     pages: usize,
     seen: usize,
     corrections: usize,
@@ -83,7 +82,6 @@ impl<'a, T: DeserializeOwned> PageStream<'a, T> {
             next: Some(first),
             buffer: VecDeque::new(),
             last_total: None,
-            last_offset: 0,
             pages: 0,
             seen: 0,
             corrections: 0,
@@ -197,7 +195,6 @@ impl<'a, T: DeserializeOwned> PageStream<'a, T> {
             }
             CrawlAdjustment::Continue => {
                 self.last_total = page.meta.total_count;
-                self.last_offset = offset;
                 self.buffer.extend(page.items);
                 self.next = next_url(&page.meta);
                 Ok(())

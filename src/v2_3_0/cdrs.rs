@@ -11,12 +11,12 @@
 use bon::Builder;
 use serde::{Deserialize, Serialize};
 
-use crate::ocpi_enum;
 use crate::types::validate_fields;
 use crate::types::{
     CiString, ContractId, CountryCode, Currency, DateTime, EvseId, Extensions, Number, OcpiString, PartyId,
     PartyRef, Validate, Validator, ViolationCode,
 };
+use crate::{ocpi_enum, ocpi_lenient_enum};
 
 use super::locations::{ConnectorFormat, ConnectorType, GeoLocation, PowerType};
 use super::tariffs::Tariff;
@@ -285,6 +285,8 @@ impl Validate for Cdr {
             credit_reference_id,
             last_updated,
         );
+        #[cfg(feature = "bookings")]
+        validate_fields!(self, v, booking_id);
 
         if self.charging_periods.is_empty() {
             v.report_at(
@@ -805,7 +807,7 @@ impl Validate for SignedValue {
     }
 }
 
-ocpi_enum! {
+ocpi_lenient_enum! {
     /// How the driver was authenticated for a session.
     ///
     /// Spec: 2.3.0 §mod_cdrs_authmethod_enum

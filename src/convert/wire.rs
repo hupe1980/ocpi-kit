@@ -280,6 +280,9 @@ impl ObjectKind {
                 "total_parking_cost",
                 "total_reservation_cost",
             ],
+            // `preauthorize_amount` is on this list whether or not the `payments` feature is on:
+            // a patch that writes it must not cross a version boundary either way, and a build
+            // that cannot model the field is in no better position to carry it.
             Self::Tariff => &["min_price", "max_price", "tax_included", "preauthorize_amount"],
             Self::Credentials => &["roles", "hub_party_id"],
             Self::ClientInfo => &["role"],

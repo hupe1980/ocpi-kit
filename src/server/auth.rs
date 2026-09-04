@@ -1,4 +1,12 @@
 //! Who is calling: resolving a credentials token to a party, in constant time.
+//!
+//! # Lock poisoning
+//!
+//! The maps here are plain data with no invariant that a panic could leave half-applied, so every
+//! lock is taken with [`PoisonError::into_inner`](std::sync::PoisonError::into_inner) rather than
+//! `unwrap`. A single panicking request must not turn a server into one that answers every
+//! subsequent request with a panic — which is what a poisoned `RwLock` does when nobody handles
+//! it.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -108,14 +116,14 @@ impl InMemoryTokenStore {
 
     /// Registers a token.
     pub fn insert(&self, token: CredentialsToken, peer: AuthenticatedPeer) {
-        let mut entries = self.entries.write().expect("token store lock poisoned");
+        let mut entries = self.entries.write().unwrap_or_else(std::sync::PoisonError::into_inner);
         entries.retain(|(existing, _)| existing != &token);
         entries.push((token, peer));
     }
 
     /// Removes a token, as a credentials `DELETE` does.
     pub fn remove(&self, token: &CredentialsToken) {
-        let mut entries = self.entries.write().expect("token store lock poisoned");
+        let mut entries = self.entries.write().unwrap_or_else(std::sync::PoisonError::into_inner);
         entries.retain(|(existing, _)| existing != token);
     }
 
@@ -123,7 +131,7 @@ impl InMemoryTokenStore {
     ///
     /// > *It is advisable to renew the credentials tokens at least once a month.*
     pub fn rotate(&self, peer_id: &str, new_token: CredentialsToken) -> bool {
-        let mut entries = self.entries.write().expect("token store lock poisoned");
+        let mut entries = self.entries.write().unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(index) = entries.iter().position(|(_, p)| p.peer_id == peer_id) else {
             return false;
         };
@@ -136,7 +144,7 @@ impl InMemoryTokenStore {
     /// How many tokens are registered.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.entries.read().expect("token store lock poisoned").len()
+        self.entries.read().unwrap_or_else(std::sync::PoisonError::into_inner).len()
     }
 
     /// Whether the store is empty.
@@ -148,7 +156,7 @@ impl InMemoryTokenStore {
 
 impl TokenStore for InMemoryTokenStore {
     fn resolve(&self, token: &CredentialsToken) -> Option<AuthenticatedPeer> {
-        let entries = self.entries.read().expect("token store lock poisoned");
+        let entries = self.entries.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         // `CredentialsToken: PartialEq` is a constant-time comparison.
         entries.iter().find(|(known, _)| known == token).map(|(_, peer)| peer.clone())
     }
@@ -205,30 +213,53 @@ impl PeerRegistry {
 
     /// Records or replaces a peer.
     pub fn upsert(&self, peer: AuthenticatedPeer) {
-        self.peers.write().expect("peer registry lock poisoned").insert(peer.peer_id.clone(), peer);
+        self.peers
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(peer.peer_id.clone(), peer);
     }
 
     /// Looks a peer up by id.
     #[must_use]
     pub fn get(&self, peer_id: &str) -> Option<AuthenticatedPeer> {
-        self.peers.read().expect("peer registry lock poisoned").get(peer_id).cloned()
+        self.peers.read().unwrap_or_else(std::sync::PoisonError::into_inner).get(peer_id).cloned()
     }
 
     /// Forgets a peer, as a credentials `DELETE` does.
     pub fn remove(&self, peer_id: &str) -> Option<AuthenticatedPeer> {
-        self.peers.write().expect("peer registry lock poisoned").remove(peer_id)
+        self.peers.write().unwrap_or_else(std::sync::PoisonError::into_inner).remove(peer_id)
     }
 
     /// Every registered peer.
     #[must_use]
     pub fn all(&self) -> Vec<AuthenticatedPeer> {
-        self.peers.read().expect("peer registry lock poisoned").values().cloned().collect()
+        self.peers.read().unwrap_or_else(std::sync::PoisonError::into_inner).values().cloned().collect()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_panic_while_holding_the_lock_does_not_break_the_store() {
+        // One request panicking must not turn a server into one that answers every subsequent
+        // request with a panic, which is what an `unwrap` on a poisoned lock does.
+        let store = std::sync::Arc::new(InMemoryTokenStore::new());
+        let token = CredentialsToken::new("token-c").unwrap();
+        store.insert(token.clone(), peer("platform-1", TokenRole::C));
+
+        let poisoner = std::sync::Arc::clone(&store);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.entries.write().unwrap();
+            panic!("a handler panicked while holding the lock");
+        })
+        .join();
+
+        assert!(store.resolve(&token).is_some(), "the store still answers");
+        store.insert(CredentialsToken::new("token-c2").unwrap(), peer("platform-2", TokenRole::C));
+        assert_eq!(store.len(), 2);
+    }
 
     fn peer(id: &str, role: TokenRole) -> AuthenticatedPeer {
         AuthenticatedPeer {

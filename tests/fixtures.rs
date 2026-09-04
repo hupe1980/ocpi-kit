@@ -54,7 +54,6 @@ fn expectations_2_3_0() -> BTreeMap<&'static str, Expect> {
     use v2_3_0::cdrs::Cdr;
     use v2_3_0::credentials::Credentials;
     use v2_3_0::locations::{Evse, Location};
-    use v2_3_0::payments::{FinancialAdviceConfirmation, Terminal};
     use v2_3_0::sessions::Session;
     use v2_3_0::tariffs::Tariff;
     use v2_3_0::tokens::Token;
@@ -130,37 +129,8 @@ fn expectations_2_3_0() -> BTreeMap<&'static str, Expect> {
         "session_patch_example_charging_period.json",
         "session_patch_example_total_cost.json",
         "token_patch_example.json",
-        "payment_terminal_location_assignment.json",
     ] {
         m.insert(f, Expect::Ok(roundtrip!(serde_json::Value)));
-    }
-
-    // --- Payments --------------------------------------------------------------------------
-    for f in [
-        "payment_terminal_activate.json",
-        "payment_terminal_create.json",
-        "payment_terminal_example_assigned_locations.json",
-        "payment_terminal_example_assigned_locations_assigned_evses.json",
-        "payment_terminal_example_newly_created.json",
-    ] {
-        m.insert(f, Expect::Ok(roundtrip!(Terminal)));
-    }
-    m.insert("payment_terminal_create_minimal.json", Expect::Ok(roundtrip!(TerminalMinimal)));
-    // A PUT body whose `terminal_id` is carried by the URL rather than the body.
-    m.insert("payment_terminal_put_update.json", Expect::Ok(roundtrip!(serde_json::Value)));
-    for f in [
-        "payment_financial_advice_confirmation_create.json",
-        "payment_financial_advice_confirmation_example_failure.json",
-        "payment_financial_advice_confirmation_example_success.json",
-    ] {
-        m.insert(
-            f,
-            Expect::Erratum(
-                roundtrip!(FinancialAdviceConfirmation),
-                "`total_costs` is written in the OCPI 2.2.1 Price shape `{excl_vat, incl_vat}`; \
-                 OCPI 2.3.0 replaced it with `{before_taxes, taxes[]}`",
-            ),
-        );
     }
 
     // --- Sessions --------------------------------------------------------------------------
@@ -598,6 +568,46 @@ fn expectations_2_1_1() -> BTreeMap<&'static str, Expect> {
     m
 }
 
+/// The 2.3.0 `payments` release branch carries the whole 2.3.0 core plus the Payments module.
+///
+/// Upstream moved Payments out of core in July 2026, onto its own release branch — the same shape
+/// the Bookings module has always had. Its examples therefore live in this corpus rather than in
+/// the core one, and the core corpus no longer carries any.
+#[cfg(feature = "payments")]
+fn expectations_payments() -> BTreeMap<&'static str, Expect> {
+    use ocpi_kit::v2_3_0::payments::{FinancialAdviceConfirmation, Terminal};
+
+    let mut m = expectations_2_3_0();
+    m.insert("payment_terminal_location_assignment.json", Expect::Ok(roundtrip!(serde_json::Value)));
+    for f in [
+        "payment_terminal_activate.json",
+        "payment_terminal_create.json",
+        "payment_terminal_example_assigned_locations.json",
+        "payment_terminal_example_assigned_locations_assigned_evses.json",
+        "payment_terminal_example_newly_created.json",
+    ] {
+        m.insert(f, Expect::Ok(roundtrip!(Terminal)));
+    }
+    m.insert("payment_terminal_create_minimal.json", Expect::Ok(roundtrip!(TerminalMinimal)));
+    // A PUT body whose `terminal_id` is carried by the URL rather than the body.
+    m.insert("payment_terminal_put_update.json", Expect::Ok(roundtrip!(serde_json::Value)));
+    for f in [
+        "payment_financial_advice_confirmation_create.json",
+        "payment_financial_advice_confirmation_example_failure.json",
+        "payment_financial_advice_confirmation_example_success.json",
+    ] {
+        m.insert(
+            f,
+            Expect::Erratum(
+                roundtrip!(FinancialAdviceConfirmation),
+                "`total_costs` is written in the OCPI 2.2.1 Price shape `{excl_vat, incl_vat}`; \
+                 OCPI 2.3.0 replaced it with `{before_taxes, taxes[]}`",
+            ),
+        );
+    }
+    m
+}
+
 /// The 2.3.0 `bookings` release branch carries the whole 2.3.0 core plus the Bookings module, so
 /// its corpus is the 2.3.0 expectations plus the Booking objects — and minus the five Location
 /// examples the branch never updated (see the erratum below).
@@ -613,9 +623,6 @@ fn expectations_bookings() -> BTreeMap<&'static str, Expect> {
          bare parking-id strings";
 
     let mut m = expectations_2_3_0();
-
-    // The `bookings` branch forked before Payments landed, so it ships none of those examples.
-    m.retain(|name, _| !name.starts_with("payment_"));
 
     for f in ["location_example.json", "location_example_parking_garage_opening_hours.json"] {
         m.insert(f, Expect::Erratum(roundtrip!(ocpi_kit::v2_3_0::locations::Location), STALE_PARKING));
@@ -673,4 +680,10 @@ fn every_ocpi_2_1_1_example_round_trips() {
 #[cfg(feature = "bookings")]
 fn every_ocpi_2_3_0_bookings_example_round_trips() {
     run_corpus("2.3.0-bookings", &expectations_bookings());
+}
+
+#[test]
+#[cfg(feature = "payments")]
+fn every_ocpi_2_3_0_payments_example_round_trips() {
+    run_corpus("2.3.0-payments", &expectations_payments());
 }

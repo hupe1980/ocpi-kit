@@ -219,7 +219,14 @@ pub struct ChargingProfile {
 
 impl Validate for ChargingProfile {
     fn validate_in(&self, v: &mut Validator) {
-        validate_fields!(self, v, start_date_time, min_charging_rate, charging_profile_period,);
+        validate_fields!(
+            self,
+            v,
+            start_date_time,
+            charging_rate_unit,
+            min_charging_rate,
+            charging_profile_period,
+        );
         if self.min_charging_rate.is_some_and(|r| r.scale() > 1) {
             v.report_at(
                 "min_charging_rate",

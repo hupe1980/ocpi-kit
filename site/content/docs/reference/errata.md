@@ -11,6 +11,14 @@ Every example below is a test in
 reason — `Expect::Erratum` where the example does not round-trip, `Expect::Tolerated` where this
 crate reads it anyway — so if upstream fixes one the test fails and says to promote it.
 
+Nineteen of the entries **in the text** are re-derived from the specification on each CI run:
+`cargo run -p xtask -- errata` expresses each as a predicate over the pinned sources — text that
+must still be there, or must still be absent — and fails when one stops reproducing. The rest
+record a place where the specification says nothing at all, which no predicate holds in place.
+These claims are public and other people quote them; a documented workaround for a problem that no
+longer exists is worse than no workaround, because it is invisible. See [Spec
+traceability](@/docs/reference/traceability.md).
+
 ## In the specification's own examples
 
 | Example | Problem |
@@ -22,6 +30,7 @@ crate reads it anyway — so if upstream fixes one the test fails and says to pr
 | `cdrs_example_of_a_cdr.json` (2.1.1) | The embedded Tariff writes `price` as the JSON *string* `"2.00"` where §types_number_type requires a number. Recorded as `Tolerated`: this crate parses it exactly and emits it unquoted |
 | `location_example.json`, `location_example_parking_garage_opening_hours.json` (bookings branch) | Give `EVSE.parking` as a list of bare id strings, although the branch's *own* property table defines it as `EVSEParking*`, identically to core 2.3.0 |
 | `booking_example.json` (bookings branch) | Every `booking_requests[].booking_request` omits `booking_location_id`, which the BookingRequest table gives cardinality 1; and `party_id` is `INF12` where the table says `CiString(3)` |
+| `tariff_13_simple_3hour_5parking.json` (2.2.1 and 2.3.0) | The `TIME` component carries `step_size: 60` on a tariff that also prices `PARKING_TIME` — and the chapter's own normative sentence says `step_size` is then *"only taken into account for the total parking duration"*. It changes nothing in the worked example, whose charging time is exactly 150 minutes, and it is exactly the shape on which two implementations reading that sentence differently disagree about a real session. `ocpi lint` reports it as `unused_time_step_size` |
 | `booking_location_example.json` (bookings branch) | `booking_option.evse_position` is a single string, but the BookingOption table gives it cardinality `*` — a list |
 
 ## In the text
@@ -32,9 +41,11 @@ crate reads it anyway — so if upstream fixes one the test fails and says to pr
 | `mod_hub_client_info` receiver PUT | The example URL uses version `2.0` and path `clientinfo`, though the module id is `hubclientinfo` | URL builders use the discovered endpoint URL; examples are not normative |
 | `mod_bookings` | The module identifier is literally `Booking`, where every other id is a lowercase plural; the receiver-interface tables link to `mod_locations` anchors | `ModuleId::Booking` matches `bookings` case-insensitively, as a documented interop accommodation |
 | The `payments` branch `ModuleID` table | Does not list `payments` at all, although the module exists and its endpoints are specified | `ModuleId::Payments` exists and documents the omission |
-| 2.3.0 `credentials` examples | No example shows `hub_party_id`, although the text mandates it for routing platforms | Our fixtures add one, marked non-spec |
+| 2.3.0 `credentials` examples | No example shows `hub_party_id`, although the text mandates it for routing platforms | This crate's fixtures add one, marked non-spec |
 | `types.asciidoc` `string(N)` | Silent on whether `N` counts bytes or characters | This crate counts Unicode scalar values, and is lenient on ingest |
 | `mod_tariffs` | Explicitly states there are no rounding rules, and notes `step_size` is removed in OCPI 3.0 | Both are settings on `PricingPolicy` |
+| `mod_tariffs`, `tax_included` **with** a `vat` | The Tariff-level field says the prices include tax; a component-level `vat` says at what rate. Nothing states how the two combine, and `N/A` beside a rate is a flat contradiction | `YES` + a rate: the tax is taken back **out** of the stated amount, so `net + tax` is what the component says. `YES` with no rate: both totals are the gross amount and a `TaxIncludedWithoutRate` note says the split is not derivable. `N/A` + a rate: the Tariff-level statement governs, and `ocpi lint` reports the contradiction |
+| `mod_tariffs`, reserved time | *"When this field is present, the TariffElement describes reservation costs"* says which elements **are** about reservations. It does not say what prices reserved time when none of them matches | Nothing does: reserved time no reservation element prices is free, with a note, which is the specification's own answer for an unpriced dimension. The alternative — letting an unrestricted element price it at the charging rate — bills a driver at a rate the CPO never published for it |
 | `mod_tariffs`, `step_size` of `0` | The text nowhere describes what a `step_size` of `0` means, yet the specification's own `tariff_5_free_of_charge.json` writes one | Read as "no quantisation": there is no multiple of nothing to round up to. A `step_size` of `1` is a different statement and *is* applied, because 1 Wh is a real unit |
 | `mod_cdrs`, Charging Periods | *"A CPO SHALL at least start (and add) a ChargingPeriod every moment/event that has relevance for the total costs of a CDR."* A period carries totals, not a curve, so one that outlasts its price cannot be apportioned after the fact — and every implementation silently prices it at the rate that applied when it began | This one prices it the same way, because there is nothing better to do with the data, and then **says so**: a `PeriodSpansPriceChange` note naming the dimension and the moment. See [Tariffs](@/docs/layers/tariffs.md) |
 | `mod_cdrs` `step_size`, `TIME` vs `PARKING_TIME` | The normative sentence is unconditional — *"In the cases that `TIME` and `PARKING_TIME` Tariff Elements are both used, `step_size` is only taken into account for the total parking duration"* — but the worked example beneath it justifies the same answer *sequentially*: *"the charging duration is not rounded up, as it is followed by another time based period."* The two part only on a session that parks and then charges | The sentence governs: `PARKING_TIME` absorbs the rounding whenever the session has any |

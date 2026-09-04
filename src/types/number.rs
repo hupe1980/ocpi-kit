@@ -106,6 +106,45 @@ impl Number {
     pub fn is_negative(self) -> bool {
         self.0.is_sign_negative() && !self.0.is_zero()
     }
+
+    /// The absolute value.
+    #[must_use]
+    pub fn abs(self) -> Self {
+        Self(self.0.abs())
+    }
+
+    /// Addition that returns `None` instead of panicking on overflow.
+    ///
+    /// The arithmetic operators on this type are the ones from [`Decimal`], and those **panic**
+    /// on overflow and on division by zero. That is the right default for a computation over
+    /// values a program produced itself, and the wrong one for values that arrived in a peer's
+    /// CDR: a `price` of 10^27 is not a tariff, but it is a number a peer can send, and the panic
+    /// it causes lands in whatever task was pricing at the time.
+    #[must_use]
+    pub fn checked_add(self, rhs: Self) -> Option<Self> {
+        self.0.checked_add(rhs.0).map(Self)
+    }
+
+    /// Subtraction that returns `None` instead of panicking on overflow. See
+    /// [`checked_add`](Self::checked_add).
+    #[must_use]
+    pub fn checked_sub(self, rhs: Self) -> Option<Self> {
+        self.0.checked_sub(rhs.0).map(Self)
+    }
+
+    /// Multiplication that returns `None` instead of panicking on overflow. See
+    /// [`checked_add`](Self::checked_add).
+    #[must_use]
+    pub fn checked_mul(self, rhs: Self) -> Option<Self> {
+        self.0.checked_mul(rhs.0).map(Self)
+    }
+
+    /// Division that returns `None` instead of panicking on overflow **or on a zero divisor**.
+    /// See [`checked_add`](Self::checked_add).
+    #[must_use]
+    pub fn checked_div(self, rhs: Self) -> Option<Self> {
+        self.0.checked_div(rhs.0).map(Self)
+    }
 }
 
 impl Validate for Number {

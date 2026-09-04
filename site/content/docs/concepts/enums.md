@@ -13,10 +13,17 @@ OCPI 2.3.0 distinguishes two kinds of enumeration, and the distinction has real 
 
 ## `ocpi_enum!` — closed
 
-The value set is fixed. An unknown value is a **decode error**, because the specification says
-nothing else is valid and silently accepting one would hide a real interop problem.
+The value set is fixed. An unknown value is a **decode error**.
 
-Used for things like `InterfaceRole` and the command result types.
+Reserved for the enums a value of which *drives a decision*, where one nobody has seen has no
+meaning to act on: the pricing engine's inputs (`TariffDimensionType`, `CdrDimensionType`,
+`TaxIncluded`, the restriction types), `DayOfWeek`, the routing layer's `InterfaceRole` and `Role`,
+and the outcome enums a caller branches on (`CommandResultType`, `ChargingProfileResultType`,
+`ReservationStatus`, `CaptureStatusCode`). Those also stay `Copy`, which the pricing engine's inner
+loops care about.
+
+The rule is not "the specification says closed" — it says that about almost everything — it is
+**does something here have to know what the value means?**
 
 ## `ocpi_open_enum!` — open
 
@@ -34,13 +41,28 @@ This is what lets a hub relay a vendor extension it has never seen. See
 
 ## `ocpi_lenient_enum!` — closed, but survivable
 
-OCPI 2.2.1 and 2.1.1 declare **every** enum closed — there is no OpenEnum in 2.2.1 at all. But a
-2.2.1 peer that has started sending a value 2.3.0 added (`MCS`, `SAE_J3400`, `EMAID`, the new
-parking restrictions) is a fact of deployment, not a hypothetical.
+The enums a peer fills in and this crate only carries — `Status`, `SessionStatus`, `AuthMethod`,
+`PowerType`, `ConnectorFormat`, `TariffType`, `WhitelistType` and their kind, in **every** version.
+An unknown value decodes into `Custom(String)`, keeps its text verbatim, and is **reported** by
+`validate()`: you get the object, and you get told it is not conformant.
 
-So the 2.2.1 and 2.1.1 enums decode an unknown value into `Custom(String)` *and* report it from
-`validate()`. You get the object, and you get told it is not conformant for that version. Nothing
-is hidden and nothing is lost.
+Two situations make this the right default rather than a concession.
+
+A 2.2.1 peer sending a value 2.3.0 added — `MCS`, `SAE_J3400`, `EMAID`, the new parking
+restrictions — is a fact of deployment, and 2.2.1 declares every enum closed, so a strict decoder
+loses those objects.
+
+And a peer sending a value *nobody* defined is the same problem with a different cause. The
+example that matters is `Evse.status`: a page of a hundred Locations, one EVSE reporting a status
+this version does not define, and a strict decoder throws away the page. So the value survives in
+`Custom`, `validate()` says it should not have been sent, and the CPO's other ninety-nine EVSEs
+arrive.
+
+```rust
+let evse: Evse = serde_json::from_str(page_with_one_odd_status)?;   // the page survives
+assert_eq!(evse.status.as_str(), "MAINTENANCE");                    // verbatim
+assert!(evse.validate().is_err());                                  // and reported
+```
 
 ## The `Custom` variant, not `Other`
 

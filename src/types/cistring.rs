@@ -156,7 +156,14 @@ impl<const N: usize> Validate for CiString<N> {
             v.report(ViolationCode::IllegalCharacter, e.to_string());
         }
         if self.0.len() > N {
-            v.report(ViolationCode::TooLong, format!("CiString({N}) holds {} characters", self.0.len()));
+            // Counted in characters rather than bytes for the message: the limit itself is in
+            // bytes because the character set is printable ASCII, but a *lenient* value from the
+            // wire may not be, and "holds 41 characters" is what a partner can check against the
+            // value they sent. The charset violation above says the rest.
+            v.report(
+                ViolationCode::TooLong,
+                format!("CiString({N}) holds {} characters", self.0.chars().count()),
+            );
         }
     }
 }

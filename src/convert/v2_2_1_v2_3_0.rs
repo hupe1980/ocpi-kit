@@ -462,6 +462,9 @@ impl Upgrade<new::tariffs::Tariff> for old::tariffs::Tariff {
             tariff_alt_url: self.tariff_alt_url,
             min_price: self.min_price.map(to_limit),
             max_price: self.max_price.map(to_limit),
+            // 2.2.1 has no Payments module to preauthorize for, and the field belongs to the
+            // 2.3.0 `payments` release branch.
+            #[cfg(feature = "payments")]
             preauthorize_amount: None,
             elements: self.elements,
             tax_included: new::tariffs::TaxIncluded::No,
@@ -494,24 +497,25 @@ impl Downgrade<old::tariffs::Tariff> for new::tariffs::Tariff {
                  treats prices as excluding VAT",
             ),
         }
+        #[cfg(feature = "payments")]
         if self.preauthorize_amount.is_some() {
             lossy.record(
                 "/preauthorize_amount",
                 "OCPI 2.2.1 has no Payments module, so the preauthorization amount is dropped",
             );
         }
-        let mut to_price = |p: new::tariffs::PriceLimit, field: &str| {
-            if p.after_taxes.is_none() {
-                lossy.record(
-                    format!("/{field}"),
-                    "the pre-tax limit is kept as `excl_vat`; OCPI 2.2.1 has no separate \
-                     after-tax bound",
-                );
-            }
-            old::types::Price { excl_vat: p.before_taxes, incl_vat: p.after_taxes, extensions: p.extensions }
+        // A `PriceLimit` and a 2.2.1 `Price` say the same two things — a bound before tax and an
+        // optional one after it — so this carries across in both directions with nothing to
+        // report. It used to record a loss whenever `after_taxes` was absent, which is the case
+        // where there is least to lose: a bound nobody set cannot go missing. A loss report that
+        // fires on the ordinary case teaches its reader to ignore loss reports.
+        let to_price = |p: new::tariffs::PriceLimit| old::types::Price {
+            excl_vat: p.before_taxes,
+            incl_vat: p.after_taxes,
+            extensions: p.extensions,
         };
-        let min_price = self.min_price.map(|p| to_price(p, "min_price"));
-        let max_price = self.max_price.map(|p| to_price(p, "max_price"));
+        let min_price = self.min_price.map(to_price);
+        let max_price = self.max_price.map(to_price);
         Converted::new(
             old::tariffs::Tariff {
                 country_code: self.country_code,

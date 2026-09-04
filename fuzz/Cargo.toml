@@ -1,0 +1,66 @@
+[package]
+name = "ocpi-kit-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+http = "1"
+
+[dependencies.ocpi-kit]
+path = ".."
+features = ["full"]
+
+# Fuzz targets are their own binaries, and the workspace must not build them by default.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "wire"
+path = "fuzz_targets/wire.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "envelope"
+path = "fuzz_targets/envelope.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "patch"
+path = "fuzz_targets/patch.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bridge"
+path = "fuzz_targets/bridge.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pricing"
+path = "fuzz_targets/pricing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "headers"
+path = "fuzz_targets/headers.rs"
+test = false
+doc = false
+bench = false

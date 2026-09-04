@@ -10,12 +10,12 @@
 use bon::Builder;
 use serde::{Deserialize, Serialize};
 
-use crate::ocpi_enum;
 use crate::types::validate_fields;
 use crate::types::{
     CiString, CountryCode, Currency, DateTime, Extensions, Number, OcpiString, PartyId, PartyRef, Validate,
     Validator, ViolationCode,
 };
+use crate::{ocpi_enum, ocpi_lenient_enum};
 
 use super::cdrs::{AuthMethod, CdrDimensionType, CdrToken, ChargingPeriod};
 use super::types::Price;
@@ -264,7 +264,7 @@ ocpi_enum! {
     }
 }
 
-ocpi_enum! {
+ocpi_lenient_enum! {
     /// The state of a session.
     ///
     /// Spec: 2.3.0 §mod_sessions_sessionstatus_enum
@@ -285,7 +285,7 @@ ocpi_enum! {
 impl SessionStatus {
     /// Whether the session can still change.
     #[must_use]
-    pub const fn is_terminal(self) -> bool {
+    pub fn is_terminal(&self) -> bool {
         matches!(self, Self::Completed | Self::Invalid)
     }
 }
