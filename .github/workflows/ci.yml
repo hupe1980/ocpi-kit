@@ -137,7 +137,7 @@ jobs:
       - run: cargo hack check --each-feature --no-dev-deps
       - run: |
           cargo hack check --feature-powerset --depth 2 --no-dev-deps \
-            --include-features v2_1_1,v2_2_1,v2_3_0,bookings,invoice-reconciliation,transport,client,server,hub,convert,tariffs,testkit,schema
+            --include-features v2_1_1,v2_2_1,v2_3_0,bookings,payments,transport,client,server,hub,convert,tariffs,testkit,schema
 
   docs:
     name: rustdoc

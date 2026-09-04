@@ -1744,7 +1744,9 @@ struct ActiveProfileQuery {
 ///
 /// This is not a merge patch — nothing is being merged — so it is decoded as a plain JSON object
 /// and wrapped, rather than going through the [`OcpiPatch`] extractor and picking up the rule
-/// that a `PATCH` must carry `last_updated`.
+/// that a `PATCH` must carry `last_updated`. Payments is the only module with such a body, so it
+/// is gated with it.
+#[cfg(feature = "payments")]
 fn partial_object<T>(body: &[u8]) -> Result<crate::transport::Patch<T>, OcpiError> {
     let value: serde_json::Value =
         serde_json::from_slice(body).map_err(|e| OcpiError::MalformedJson(e.to_string()))?;
