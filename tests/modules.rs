@@ -407,7 +407,7 @@ async fn the_three_charging_profile_verbs_reach_their_handlers() {
     let server = start().await;
     let client = client();
     let peer = peer_at(&server.base);
-    let profiles = peer.charging_profiles(client.transport(), test_msp());
+    let profiles = client.peer(&peer, test_msp()).charging_profiles();
     let callbacks = CallbackUrls::new(server.base.clone());
 
     let response = profiles
@@ -505,7 +505,7 @@ async fn a_cpo_can_volunteer_a_changed_active_profile() {
     let server = start().await;
     let client = client();
     let peer = peer_at(&server.base);
-    peer.charging_profiles(client.transport(), test_msp())
+    client.peer(&peer, test_msp()).charging_profiles()
         .push_active_charging_profile("SESSION-9", &sample_profile())
         .await
         .expect("the PUT on the Sender interface reaches the handler");
@@ -553,7 +553,7 @@ async fn the_payments_sender_interface_round_trips_through_one_discovered_endpoi
     let server = start().await;
     let client = client();
     let peer = peer_at(&server.base);
-    let payments = peer.payments(client.transport(), test_msp());
+    let payments = client.peer(&peer, test_msp()).payments();
 
     let created = payments
         .activate_terminal(&Patch::<Terminal>::from_value(serde_json::json!({ "reference": "SN-42" })))
@@ -607,7 +607,7 @@ async fn activate_is_a_static_segment_that_a_terminal_id_cannot_shadow() {
     let server = start().await;
     let client = client();
     let peer = peer_at(&server.base);
-    let payments = peer.payments(client.transport(), test_msp());
+    let payments = client.peer(&peer, test_msp()).payments();
 
     payments
         .activate_terminal(&Patch::<Terminal>::from_value(serde_json::json!({})))
@@ -626,7 +626,7 @@ async fn the_payments_receiver_interface_uses_post_not_put() {
     let server = start().await;
     let client = client();
     let peer = peer_at(&server.base);
-    let payments = peer.payments(client.transport(), test_msp());
+    let payments = client.peer(&peer, test_msp()).payments();
 
     let echoed = payments
         .post_terminal_to_receiver(&sample_terminal("TERM-7"))
@@ -655,7 +655,7 @@ async fn hub_client_info_round_trips_without_routing_headers() {
     let server = start().await;
     let client = client();
     let peer = peer_at(&server.base);
-    let hub_info = peer.hub_client_info(client.transport(), test_msp());
+    let hub_info = client.peer(&peer, test_msp()).hub_client_info();
 
     let mut listed = hub_info.list(PageQuery::new()).expect("the peer implements the Sender interface");
     let first = listed.next().await.expect("the crawl succeeds").expect("one entry");
@@ -684,8 +684,7 @@ async fn client_info_is_about_a_party_the_caller_does_not_have_to_own() {
     let peer = peer_at(&server.base);
     let other = PartyRef::new("DE", "XYZ").expect("a valid party");
 
-    let info = peer
-        .hub_client_info(client.transport(), test_msp())
+    let info = client.peer(&peer, test_msp()).hub_client_info()
         .client_info(&other)
         .await
         .expect("a 404 here would make the module unusable for its actual purpose");
@@ -747,8 +746,7 @@ async fn a_missing_interface_is_reported_before_a_request_is_made() {
         .versions_url(server.base.join("versions"))
         .party(test_cpo())
         .build();
-    let error = bare
-        .payments(client.transport(), test_msp())
+    let error = client.peer(&bare, test_msp()).payments()
         .terminal("TERM-1")
         .await
         .expect_err("the peer does not implement Payments");

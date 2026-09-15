@@ -56,7 +56,8 @@ peer.require(&[(ModuleId::Locations, InterfaceRole::Sender)])?;
 
 let peer = peer.register(client.transport(), &my_credentials).await?; // POST /credentials
 
-let mut locations = peer.locations(client.transport(), me).list(PageQuery::new())?;
+let cpo = client.peer(&peer, me);                                   // bind transport + peer + party
+let mut locations = cpo.locations().list(PageQuery::new())?;
 while let Some(location) = locations.next().await? {
     println!("{} {}", location.id, location.name.as_deref().unwrap_or(""));
 }

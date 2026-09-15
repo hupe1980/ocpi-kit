@@ -449,7 +449,7 @@ proptest! {
 #[cfg(all(feature = "tariffs", feature = "v2_3_0"))]
 mod pricing {
     use super::{any_number, config};
-    use ocpi_kit::tariffs::{PricedPeriod, PricedSession, PricingEngine, TimeZone};
+    use ocpi_kit::tariffs::{PriceLimitApplied, PricedPeriod, PricedSession, PricingEngine, TimeZone};
     use ocpi_kit::types::{DateTime, Extensions, Number};
     use ocpi_kit::v2_3_0::tariffs::{
         PriceComponent, PriceLimit, Tariff, TariffDimensionType, TariffElement, TaxIncluded,
@@ -457,8 +457,19 @@ mod pricing {
     use proptest::prelude::*;
 
     /// A non-negative amount with at most two decimals, which is what a price or a limit is.
+    /// A non-negative monetary amount, for the fields where a negative one is meaningless.
     fn any_amount() -> impl Strategy<Value = Number> {
         (0i64..100_000i64).prop_map(|cents| Number::new(rust_decimal::Decimal::new(cents, 2)))
+    }
+
+    /// A price, **which may be negative**.
+    ///
+    /// OCPI does not constrain the sign of `PriceComponent.price`, and a negative one is not a
+    /// malformed tariff: it is a refund line, or energy fed back to the grid. Generating only
+    /// non-negative prices is what let a bug that dropped the tax off every credit survive a
+    /// property suite that claimed to hold "for any tariff".
+    fn any_price() -> impl Strategy<Value = Number> {
+        (-20_000i64..100_000i64).prop_map(|cents| Number::new(rust_decimal::Decimal::new(cents, 2)))
     }
 
     /// A VAT percentage, **including invalid ones**.
@@ -489,9 +500,18 @@ mod pricing {
         proptest::prop_oneof![Just(TaxIncluded::No), Just(TaxIncluded::Yes), Just(TaxIncluded::NotApplicable)]
     }
 
+    /// Whether a `min_price` floor should still hold on the published total.
+    ///
+    /// A `max_price` that binds can legitimately pull a total back below the floor — the two
+    /// limits contradict each other and the ceiling is the one the engine applies last. Only the
+    /// case where no maximum was applied is a statement about the floor.
+    fn limits_are_compatible(_min: &PriceLimit, applied: Option<PriceLimitApplied>) -> bool {
+        applied != Some(PriceLimitApplied::Maximum)
+    }
+
     fn any_tariff() -> impl Strategy<Value = Tariff> {
         (
-            proptest::collection::vec((any_amount(), any_vat(), 0u32..3600u32), 1..4),
+            proptest::collection::vec((any_price(), any_vat(), 0u32..3600u32), 1..4),
             any_limit(),
             any_limit(),
             any_tax_basis(),
@@ -573,23 +593,88 @@ mod pricing {
             );
         }
 
-        /// The inclusive total is never below the exclusive one, and neither is ever negative.
+        /// Tax never runs against the sign of the amount it is charged on.
         ///
-        /// A clamp is the easy way to break this: raising one total and leaving the other alone
-        /// produces a session that costs less with tax than without.
+        /// This replaces an older property that asserted the totals were never negative, which
+        /// was not a law of the domain — a refund or a V2G credit is a negative total — and which
+        /// held only because the generator could not produce a negative price. Asserting it
+        /// *hid* the case where the engine dropped the tax off every credit.
+        ///
+        /// What is actually true is weaker and real: a positive total owes non-negative tax, a
+        /// negative total owes non-positive tax, and a zero total owes none.
         #[test]
-        fn the_totals_are_ordered_and_non_negative(
+        fn tax_follows_the_sign_of_its_base(
             tariff in any_tariff(),
             session in any_session(),
         ) {
             let breakdown = PricingEngine::new().price(&session, &[tariff]).expect("prices");
-            prop_assert!(!breakdown.total_excl_vat.is_negative(), "{}", breakdown.total_excl_vat);
-            prop_assert!(
-                breakdown.total_incl_vat >= breakdown.total_excl_vat,
-                "{} incl < {} excl",
-                breakdown.total_incl_vat,
-                breakdown.total_excl_vat
-            );
+            let excl = breakdown.total_excl_vat;
+            let tax = breakdown.total_incl_vat - excl;
+            if excl.is_positive() {
+                prop_assert!(!tax.is_negative(), "positive total {excl} with tax {tax}");
+            } else if excl.is_negative() {
+                prop_assert!(!tax.is_positive(), "negative total {excl} with tax {tax}");
+            } else {
+                prop_assert!(tax.is_zero(), "zero total with tax {tax}");
+            }
+        }
+
+        /// A breakdown never reports a total outside the limits its own Tariff publishes.
+        ///
+        /// The point of `min_price`/`max_price` is that they bound the answer. An engine that
+        /// applies one clamp and then lets a later step move the total back across the bound has
+        /// published a number the Tariff says cannot happen — which is what an `after_taxes` cap
+        /// below the pre-tax total used to do, silently.
+        ///
+        /// Stated on the totals rather than on the code path, so it holds however the clamping is
+        /// implemented.
+        #[test]
+        fn the_totals_respect_the_limits_the_tariff_publishes(
+            tariff in any_tariff(),
+            session in any_session(),
+        ) {
+            let limits = (tariff.min_price.clone(), tariff.max_price.clone());
+            let breakdown = PricingEngine::new().price(&session, &[tariff]).expect("prices");
+            let (excl, incl) = (breakdown.total_excl_vat, breakdown.total_incl_vat);
+            if let Some(max) = limits.1 {
+                prop_assert!(excl <= max.before_taxes, "{excl} exceeds max before_taxes {}", max.before_taxes);
+                if let Some(after) = max.after_taxes {
+                    prop_assert!(incl <= after, "{incl} exceeds max after_taxes {after}");
+                }
+            }
+            if let Some(min) = limits.0 {
+                // A maximum can legitimately pull a total back below a minimum; only check the
+                // floor where no ceiling is fighting it.
+                if limits_are_compatible(&min, breakdown.limit_applied) {
+                    prop_assert!(excl >= min.before_taxes, "{excl} below min before_taxes {}", min.before_taxes);
+                }
+            }
+        }
+
+        /// A session that was taxed never reports zero tax without saying why.
+        ///
+        /// The "tax lines account for the difference between the totals" property is satisfied by
+        /// a breakdown that dropped every tax line and set both totals equal — which is exactly
+        /// what three separate bugs did. This is the invariant that tells those apart: if tax was
+        /// charged on a segment, either the totals differ or a note explains where it went.
+        #[test]
+        fn tax_that_was_charged_is_never_silently_dropped(
+            tariff in any_tariff(),
+            session in any_session(),
+        ) {
+            let breakdown = PricingEngine::new().price(&session, &[tariff]).expect("prices");
+            let charged: Number = breakdown
+                .dimensions
+                .iter()
+                .flat_map(|d| d.segments.iter())
+                .map(|s| s.tax)
+                .sum();
+            if !charged.is_zero() && breakdown.total_incl_vat == breakdown.total_excl_vat {
+                prop_assert!(
+                    !breakdown.notes.is_empty(),
+                    "{charged} of tax was charged on segments and neither total nor any note shows it"
+                );
+            }
         }
 
         /// Every number in a breakdown survives being written to JSON and read back.

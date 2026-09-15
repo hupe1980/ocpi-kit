@@ -90,30 +90,29 @@ async fn every_seeded_module_answers_its_typed_client() {
     let peer = peer_at(&server.base, VersionNumber::V2_3_0);
     let me = test_msp();
 
-    let location = peer.locations(c.transport(), me.clone()).location("LOC1").await.expect("seeded");
+    let location = c.peer(&peer, me.clone()).locations().location("LOC1").await.expect("seeded");
     assert_eq!(location.id.as_str(), "LOC1");
-    let evse = peer.locations(c.transport(), me.clone()).evse("LOC1", "3256").await.expect("seeded");
+    let evse = c.peer(&peer, me.clone()).locations().evse("LOC1", "3256").await.expect("seeded");
     assert_eq!(evse.uid.as_str(), "3256");
-    peer.locations(c.transport(), me.clone()).connector("LOC1", "3256", "1").await.expect("seeded");
+    c.peer(&peer, me.clone()).locations().connector("LOC1", "3256", "1").await.expect("seeded");
 
     let sessions =
-        peer.sessions(c.transport(), me.clone()).list(PageQuery::new()).expect("mounted").collect_all();
+        c.peer(&peer, me.clone()).sessions().list(PageQuery::new()).expect("mounted").collect_all();
     assert_eq!(sessions.await.expect("a page").len(), 1);
-    let cdrs = peer.cdrs(c.transport(), me.clone()).list(PageQuery::new()).expect("mounted").collect_all();
+    let cdrs = c.peer(&peer, me.clone()).cdrs().list(PageQuery::new()).expect("mounted").collect_all();
     assert_eq!(cdrs.await.expect("a page").len(), 1);
     let tariffs =
-        peer.tariffs(c.transport(), me.clone()).list(PageQuery::new()).expect("mounted").collect_all();
+        c.peer(&peer, me.clone()).tariffs().list(PageQuery::new()).expect("mounted").collect_all();
     assert_eq!(tariffs.await.expect("a page").len(), 1);
 
     // The real-time authorization, both answers the specification names.
-    let allowed = peer
-        .tokens(c.transport(), me.clone())
+    let allowed = c.peer(&peer, me.clone()).tokens()
         .authorize("012345678", None, None)
         .await
         .expect("a known token");
     assert_eq!(allowed.allowed, ocpi_kit::v2_3_0::tokens::AllowedType::Allowed);
     let unknown =
-        peer.tokens(c.transport(), me).authorize("not-a-token", None, None).await.expect_err("2004");
+        c.peer(&peer, me).tokens().authorize("not-a-token", None, None).await.expect_err("2004");
     assert_eq!(unknown.status_code(), ocpi_kit::transport::StatusCode::UNKNOWN_TOKEN);
 }
 
@@ -127,7 +126,7 @@ async fn a_partner_can_push_and_the_peer_keeps_it() {
     let mut token = sample::token("push-1").expect("valid sample");
     token.country_code = me.country_code.clone();
     token.party_id = me.party_id.clone();
-    peer.tokens_receiver(c.transport(), me.clone())
+    c.peer(&peer, me.clone()).tokens_receiver()
         .put_token(&me, &token)
         .await
         .expect("a partner may write under its own party");
@@ -139,14 +138,14 @@ async fn a_partner_can_push_and_the_peer_keeps_it() {
         "valid": false,
         "last_updated": "2024-06-01T00:00:00Z",
     }));
-    peer.tokens_receiver(c.transport(), me.clone())
+    c.peer(&peer, me.clone()).tokens_receiver()
         .patch(&me, "push-1", None, &patch)
         .await
         .expect("a well-formed patch");
     assert!(!server.peer.tokens.get("push-1").expect("still there").valid);
 
     let bad: Patch<ocpi_kit::v2_3_0::tokens::Token> = Patch::from_value(serde_json::json!({ "valid": true }));
-    peer.tokens_receiver(c.transport(), me)
+    c.peer(&peer, me).tokens_receiver()
         .patch(&test_msp(), "push-1", None, &bad)
         .await
         .expect_err("a PATCH without last_updated is a 2001");
@@ -162,7 +161,7 @@ async fn writing_under_a_party_that_is_not_yours_is_refused() {
     // The mock's token store says this partner speaks for DE/ABC. Writing under NL/TNM is
     // "blocking client access to objects that do not belong to them", which is a 404.
     let token = sample::token("push-2").expect("valid sample");
-    peer.tokens_receiver(c.transport(), test_msp())
+    c.peer(&peer, test_msp()).tokens_receiver()
         .put_token(&test_cpo(), &token)
         .await
         .expect_err("not this partner's party");

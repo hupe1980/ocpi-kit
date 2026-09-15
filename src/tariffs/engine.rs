@@ -487,93 +487,142 @@ impl PricingEngine {
         }
 
         let raw_excl: Number = dimensions.iter().map(|d| d.cost).sum();
-        let raw_vat: Number = taxes.iter().map(|t| t.amount).sum();
-        let mut total_excl = self.policy.round_currency(raw_excl);
-        let mut total_incl = self.policy.round_currency(raw_excl + raw_vat);
-        let mut limit_applied = None;
+        let mut raw_vat: Number = taxes.iter().map(|t| t.amount).sum();
 
-        if let Some(min) = tariff.min_price.as_ref() {
-            if total_excl < min.before_taxes {
-                total_excl = self.policy.round_currency(min.before_taxes);
-                limit_applied = Some(PriceLimitApplied::Minimum);
-            }
-            if let Some(after) = min.after_taxes
-                && total_incl < after
-            {
-                total_incl = self.policy.round_currency(after);
-                limit_applied = Some(PriceLimitApplied::Minimum);
-            }
-        }
-        if let Some(max) = tariff.max_price.as_ref() {
-            if total_excl > max.before_taxes {
-                total_excl = self.policy.round_currency(max.before_taxes);
-                limit_applied = Some(PriceLimitApplied::Maximum);
-            }
-            if let Some(after) = max.after_taxes
-                && total_incl > after
-            {
-                total_incl = self.policy.round_currency(after);
-                limit_applied = Some(PriceLimitApplied::Maximum);
-            }
-        }
-
-        let mut base_ratio = Number::ONE;
-        if let Some(applied) = limit_applied {
-            // The pre-tax total moved, so the tax owed on it moved too — unless an explicit
-            // after-tax bound already decided the inclusive total, in which case that wins and
-            // the tax is whatever is left between them.
-            base_ratio = if raw_excl.is_zero() {
-                Number::ONE
-            } else {
-                total_excl.checked_div(raw_excl).unwrap_or(Number::ONE)
-            };
-            let bounded_after_tax = match applied {
-                PriceLimitApplied::Minimum => tariff.min_price.as_ref().and_then(|p| p.after_taxes),
-                PriceLimitApplied::Maximum => tariff.max_price.as_ref().and_then(|p| p.after_taxes),
-            };
-            if bounded_after_tax.is_none() {
-                // Nothing was metered to scale from: the effective rate is unknowable.
-                let scaled_vat = if raw_excl.is_zero() {
-                    Number::ZERO
-                } else {
-                    raw_vat.checked_mul(base_ratio).unwrap_or(raw_vat)
-                };
-                total_incl = self.policy.round_currency(total_excl + scaled_vat);
-            }
-            total_incl = total_incl.max(total_excl);
-            notes.push(PricingNote::new(
-                PricingNoteCode::TotalClamped,
-                None,
-                format!(
-                    "the session metered {raw_excl} before tax, which the tariff's {} price \
-                     limit moved to {total_excl}; the tax lines were moved in proportion so they \
-                     still account for the difference between the two totals",
-                    match applied {
-                        PriceLimitApplied::Minimum => "minimum",
-                        PriceLimitApplied::Maximum => "maximum",
-                    },
-                ),
-            ));
-        }
-
-        // A tariff with a negative `vat` is malformed — `Validate` reports it — but the engine
-        // does not require validated input, and a breakdown where the session costs less with tax
-        // than without is not a document anybody can use.
-        if total_incl < total_excl {
+        // Tax follows the sign of its base: a credit owes negative tax. Only a disagreement in
+        // sign is malformed, and its cause is a negative VAT percentage. Settled here, on the
+        // components, because settling it after the price limits let it raise a total back across
+        // a ceiling that had already been applied.
+        if (raw_excl.is_negative() && raw_vat.is_positive())
+            || (raw_excl.is_positive() && raw_vat.is_negative())
+        {
             notes.push(PricingNote::new(
                 PricingNoteCode::NegativeTax,
                 None,
                 format!(
-                    "the price components of this tariff describe {} of tax, which no tariff can \
-                     mean; the inclusive total is held at the exclusive one. A VAT percentage \
-                     below zero is what causes this, and `Tariff::validate` names the component",
-                    total_incl - total_excl,
+                    "the price components of this tariff describe {raw_vat} of tax on a total of \
+                     {raw_excl}, so the tax runs against the amount it is charged on; it is \
+                     dropped and the two totals are reported as one. A VAT percentage below zero \
+                     is what causes this, and `Tariff::validate` names the component"
                 ),
             ));
-            total_incl = total_excl;
+            raw_vat = Number::ZERO;
         }
 
-        self.present_taxes(&mut taxes, total_incl - total_excl, base_ratio, total_excl, &mut notes);
+        let natural_excl = self.policy.round_currency(raw_excl);
+        let natural_incl = self.policy.round_currency(raw_excl + raw_vat);
+
+        // ---- price limits -----------------------------------------------------------------
+        //
+        // Applied to the **finished** totals, in one place: bound the pre-tax total, derive the
+        // tax on it, bound the post-tax total, reconcile the two. Clamping while the totals are
+        // still being assembled lets a later step carry one back across a bound already checked.
+        let mut total_excl = natural_excl;
+        let mut limit_applied = None;
+        if let Some(min) = tariff.min_price.as_ref()
+            && total_excl < min.before_taxes
+        {
+            total_excl = self.policy.round_currency(min.before_taxes);
+            limit_applied = Some(PriceLimitApplied::Minimum);
+        }
+        if let Some(max) = tariff.max_price.as_ref()
+            && total_excl > max.before_taxes
+        {
+            total_excl = self.policy.round_currency(max.before_taxes);
+            limit_applied = Some(PriceLimitApplied::Maximum);
+        }
+
+        // The tax the moved pre-tax total carries. Where nothing was metered there is no priced
+        // segment to take a rate from, so the Tariff's own rate is used when it names exactly one.
+        let mut base_ratio = Number::ONE;
+        let mut clamp_rate: Option<Number> = None;
+        let mut total_incl = if total_excl == natural_excl {
+            natural_incl
+        } else if raw_excl.is_zero() {
+            match sole_vat_rate(tariff) {
+                Some(rate) if basis_of(tariff) == TaxBasis::Excluded => {
+                    clamp_rate = Some(rate);
+                    self.policy
+                        .round_currency(total_excl + total_excl * rate / Number::from(100u32))
+                }
+                _ => {
+                    note_once(
+                        &mut notes,
+                        PricingNoteCode::ClampedTaxNotDerivable,
+                        "this session metered nothing that carries a rate, so the tax on the \
+                         amount its price limit moved to is not derivable from the Tariff; both \
+                         totals report that amount, and the difference between them is not a \
+                         statement that no tax is due",
+                    );
+                    total_excl
+                }
+            }
+        } else {
+            base_ratio = total_excl.checked_div(raw_excl).unwrap_or(Number::ONE);
+            let scaled_vat = raw_vat.checked_mul(base_ratio).unwrap_or(raw_vat);
+            self.policy.round_currency(total_excl + scaled_vat)
+        };
+
+        if let Some(min) = tariff.min_price.as_ref()
+            && let Some(after) = min.after_taxes
+            && total_incl < after
+        {
+            total_incl = self.policy.round_currency(after);
+            limit_applied = limit_applied.or(Some(PriceLimitApplied::Minimum));
+        }
+        if let Some(max) = tariff.max_price.as_ref()
+            && let Some(after) = max.after_taxes
+            && total_incl > after
+        {
+            total_incl = self.policy.round_currency(after);
+            limit_applied = Some(PriceLimitApplied::Maximum);
+        }
+
+        if limit_applied.is_some() {
+            notes.push(PricingNote::new(
+                PricingNoteCode::TotalClamped,
+                None,
+                format!(
+                    "the session metered {natural_excl} before tax and {natural_incl} after it; \
+                     this tariff's price limits moved that to {total_excl} and {total_incl}, and \
+                     the tax lines were moved with it so they still account for the difference"
+                ),
+            ));
+        }
+
+        // ---- coherence --------------------------------------------------------------------
+        //
+        // A post-tax bound below the pre-tax total asks for negative tax, which no rate can
+        // produce. The bound is what the Tariff publishes, so it governs both totals rather than
+        // being discarded — which used to publish a total above the stated maximum.
+        if total_excl.is_positive() && total_incl < total_excl {
+            let capped = tariff
+                .max_price
+                .as_ref()
+                .and_then(|p| p.after_taxes)
+                .is_some_and(|cap| cap <= total_incl);
+            if capped {
+                notes.push(PricingNote::new(
+                    PricingNoteCode::ContradictoryPriceLimit,
+                    None,
+                    format!(
+                        "this tariff caps the total after taxes at {total_incl} while the session \
+                         comes to {total_excl} before them, which no rate can reconcile; the \
+                         after-tax bound governs and the pre-tax total is brought down to it"
+                    ),
+                ));
+                total_excl = total_incl;
+            }
+        }
+
+        self.present_taxes(
+            &mut taxes,
+            total_incl - total_excl,
+            base_ratio,
+            total_excl,
+            clamp_rate,
+            &mut notes,
+        );
 
         CostBreakdown {
             dimensions,
@@ -605,6 +654,7 @@ impl PricingEngine {
         owed: Number,
         base_ratio: Number,
         taxable_base: Number,
+        clamp_rate: Option<Number>,
         notes: &mut Vec<PricingNote>,
     ) {
         let current: Number = taxes.iter().map(|t| t.amount).sum();
@@ -616,6 +666,13 @@ impl PricingEngine {
                         .round_currency(line.taxable.checked_mul(base_ratio).unwrap_or(line.taxable));
                     line.amount = Number::ZERO;
                 }
+                return;
+            }
+            // Where a clamp was taxed at a rate derived from the Tariff, the line names it: the
+            // amount and the rate are both facts the Tariff carries.
+            if let Some(rate) = clamp_rate {
+                taxes.clear();
+                taxes.push(TaxLine { percentage: Some(rate), taxable: taxable_base, amount: owed });
                 return;
             }
             // A price limit's `after_taxes` bound above a session that named no VAT at all: the
@@ -716,6 +773,28 @@ struct Segment {
     /// `step_size` of the Price Component that priced it, in the dimension's own unit.
     step_size: u32,
     priced: PricedSegment,
+}
+
+/// The single VAT percentage this Tariff names, when every component that names one agrees.
+///
+/// Used only where a price limit moved a total that nothing was metered against, so there is no
+/// priced segment to take a rate from. Where the components disagree, or name no rate at all, the
+/// answer is `None` and the engine says the tax is not derivable rather than picking one.
+fn sole_vat_rate(tariff: &Tariff) -> Option<Number> {
+    let mut found: Option<Number> = None;
+    for rate in tariff
+        .elements
+        .iter()
+        .flat_map(|e| e.price_components.iter())
+        .filter_map(|c| c.vat)
+    {
+        match found {
+            None => found = Some(rate),
+            Some(first) if first == rate => {}
+            Some(_) => return None,
+        }
+    }
+    found
 }
 
 /// The tax basis a Tariff states.

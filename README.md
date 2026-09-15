@@ -17,7 +17,7 @@ needs, an **auditable tariff engine**, and a CLI — behind cargo features, in o
 cargo add ocpi-kit
 ```
 
-## The four properties that decide quality
+## The five properties that decide quality
 
 **Money is never a float.** Every `number` in every object is an exact decimal
 (`rust_decimal::Decimal` behind `types::Number`). No public field of any OCPI object in this crate
@@ -53,13 +53,21 @@ against OCPI 2.3.0. The wire speaks whatever the other party runs — which, in 
 
 ```rust
 // The peer is on 2.2.1. What comes back is a v2_3_0::tariffs::Tariff.
-let mut tariffs = peer.tariffs(client.transport(), me).list(PageQuery::new())?;
+let mut tariffs = client.peer(&peer, me).tariffs().list(PageQuery::new())?;
 while let Some(tariff) = tariffs.next().await? { /* tariff.tax_included is TaxIncluded::No */ }
 ```
 
 A 2.2.1 `Tariff` has no `tax_included`, which 2.3.0 made **required** — so a library that models both
 versions and translates neither cannot decode most of the market. Every other OCPI library, in every
 language, leaves that translation to you.
+
+**An answer about money comes with its argument.** `CostBreakdown` does not report a total; it
+reports which quantity was billed per dimension, what `step_size` did to it, which Tariff Element
+and Price Component priced it and why that element was selected — then audits the CDR it is
+pricing, so a plausible total from a malformed CDR is reported rather than served. Beside the
+engine sit a **linter**, for tariffs that are conformant and still not what their author meant, and
+a **verifier**, which checks a CDR against its own tariff *and* against its own Charging Periods.
+That is what lets two parties compare reasoning instead of comparing totals and each insisting.
 
 ## What is in the box
 
@@ -108,7 +116,9 @@ peer.require(&[(ModuleId::Locations, InterfaceRole::Sender)])?;
 let peer = peer.register(client.transport(), &my_credentials()).await?;
 
 // Then pull, following every `Link: rel="next"` header.
-let mut locations = peer.locations(client.transport(), me).list(PageQuery::new())?;
+// Bind the transport, the peer and the party you call as — once, not per call.
+let cpo = client.peer(&peer, me);
+let mut locations = cpo.locations().list(PageQuery::new())?;
 while let Some(location) = locations.next().await? {
     println!("{} {}", location.id, location.name.as_deref().unwrap_or(""));
 }
@@ -208,7 +218,7 @@ let breakdown = PricingEngine::new().price(&session, &tariffs)?;
 assert_eq!(breakdown.total_excl_vat.to_string(), "5.00");
 ```
 
-The answer is **auditable**: `CostBreakdown` does not just say `12.28`, it says which quantity was
+The answer is **auditable**: `CostBreakdown` does not just say `12.375`, it says which quantity was
 billed for each dimension, what `step_size` did to it, which Tariff Element and which Price
 Component priced it, and why that element was selected. The arithmetic is exact. The parts the
 specification deliberately leaves open — rounding, and `step_size` itself, which OCPI 3.0 removes —
@@ -441,7 +451,7 @@ and ships.
   they say nothing about whether what comes out is legible.
 * **The conformance runner pointed at our own server**, so the two keep each other honest.
 
-574 tests across twelve targets. Clippy at `pedantic` with `-D warnings` under three feature sets,
+584 tests across twelve targets. Clippy at `pedantic` with `-D warnings` under three feature sets,
 every feature and every pair of layer features compiled, `cargo deny`, and benchmarks for what the
 guarantees cost:
 

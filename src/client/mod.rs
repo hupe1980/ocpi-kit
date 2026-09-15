@@ -23,8 +23,11 @@
 //!
 //! let peer = peer.register(client.transport(), &my_credentials()).await?;
 //!
+//! // Bind the transport, the peer and the party you are calling as — once, not per call.
+//! let cpo = client.peer(&peer, me);
+//!
 //! // Then pull, following every `Link: rel="next"`.
-//! let mut locations = peer.locations(client.transport(), me).list(PageQuery::new())?;
+//! let mut locations = cpo.locations().list(PageQuery::new())?;
 //! while let Some(location) = locations.next().await? {
 //!     println!("{} {}", location.id, location.name.as_deref().unwrap_or(""));
 //! }
@@ -63,8 +66,8 @@ pub use http::{OcpiRequest, Transport, check_outgoing};
 pub use modules::PaymentsClient;
 pub use modules::{
     CdrsClient, ChargingProfilesClient, CommandsClient, HubClientInfoClient, LocationsReceiver,
-    LocationsSender, ModuleClient, SessionsReceiver, SessionsSender, TariffsReceiver, TariffsSender,
-    TokensReceiver, TokensSender, correlated_ids,
+    LocationsSender, ModuleClient, PeerSession, SessionsReceiver, SessionsSender, TariffsReceiver,
+    TariffsSender, TokensReceiver, TokensSender, correlated_ids,
 };
 pub use paging::{DEFAULT_MAX_PAGES, PageStream};
 pub use peer::{Peer, PeerBuilder};
@@ -202,7 +205,26 @@ impl OcpiClient {
         Self { transport: Transport::new(http, config) }
     }
 
-    /// The request executor, which the handshake and the module clients take.
+    /// Everything one of your parties can call on one registered peer.
+    ///
+    /// The entry point for every module call. The transport, the peer and the party making the
+    /// request do not change between calls, so they are bound once here rather than passed to
+    /// each one.
+    ///
+    /// ```no_run
+    /// # use ocpi_kit::client::{OcpiClient, Peer};
+    /// # async fn f(peer: Peer) -> Result<(), Box<dyn std::error::Error>> {
+    /// let client = OcpiClient::new()?;
+    /// let cpo = client.peer(&peer, "NL/TNM".parse()?);
+    /// let location = cpo.locations().location("LOC1").await?;
+    /// # Ok(()) }
+    /// ```
+    #[must_use]
+    pub fn peer<'a>(&'a self, peer: &'a Peer, from: crate::types::PartyRef) -> PeerSession<'a> {
+        PeerSession::new(&self.transport, peer, from)
+    }
+
+    /// The request executor, which the registration handshake takes.
     #[must_use]
     pub const fn transport(&self) -> &Transport {
         &self.transport

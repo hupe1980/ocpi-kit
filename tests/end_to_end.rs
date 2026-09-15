@@ -300,8 +300,7 @@ async fn a_paginated_pull_crawls_every_page() {
     let client = client();
     let peer = peer_at(&server.base, test_token("c"));
 
-    let mut stream = peer
-        .locations(client.transport(), test_msp())
+    let mut stream = client.peer(&peer, test_msp()).locations()
         .list(PageQuery::new())
         .expect("the peer implements the Sender interface");
 
@@ -329,8 +328,7 @@ async fn a_date_window_narrows_the_pull_and_the_total_count() {
     let from = all[3].last_updated;
     let to = all[7].last_updated;
 
-    let objects = peer
-        .locations(client.transport(), test_msp())
+    let objects = client.peer(&peer, test_msp()).locations()
         .list(PageQuery::between(from, to))
         .expect("mounted")
         .collect_all()
@@ -346,7 +344,7 @@ async fn one_object_can_be_fetched_by_id_and_a_missing_one_is_a_404() {
     let (server, _cpo) = start(100, 3).await;
     let client = client();
     let peer = peer_at(&server.base, test_token("c"));
-    let locations = peer.locations(client.transport(), test_msp());
+    let locations = client.peer(&peer, test_msp()).locations();
 
     let found = locations.location("LOC1").await.expect("LOC1 exists");
     assert_eq!(found.id.as_str(), "LOC1");
@@ -362,7 +360,7 @@ async fn nested_evse_and_connector_urls_resolve() {
     let (server, _cpo) = start(100, 1).await;
     let client = client();
     let peer = peer_at(&server.base, test_token("c"));
-    let locations = peer.locations(client.transport(), test_msp());
+    let locations = client.peer(&peer, test_msp()).locations();
 
     let evse = locations.evse("LOC0", "3256").await.expect("the sample EVSE");
     assert_eq!(evse.uid.as_str(), "3256");
@@ -375,7 +373,7 @@ async fn a_client_owned_put_then_patch_round_trips() {
     let (server, cpo) = start(100, 0).await;
     let client = client();
     let peer = peer_at(&server.base, test_token("c"));
-    let receiver = peer.locations_receiver(client.transport(), test_msp());
+    let receiver = client.peer(&peer, test_msp()).locations_receiver();
 
     let location = sample::location("LOC-NEW").expect("valid sample");
     receiver.put_location(&test_msp(), &location).await.expect("the PUT succeeds");
@@ -406,7 +404,7 @@ async fn a_failed_patch_falls_back_to_get_then_put() {
     let (server, cpo) = start(10, 0).await;
     let client = client();
     let peer = peer_at(&server.base, test_token("c"));
-    let locations = peer.locations_receiver(client.transport(), test_msp());
+    let locations = client.peer(&peer, test_msp()).locations_receiver();
     let location = sample::location("LOC-NEW").expect("valid sample");
 
     // The object does not exist yet, so the PATCH fails.
@@ -449,7 +447,7 @@ async fn a_patch_without_last_updated_never_reaches_the_handler() {
     let (server, cpo) = start(100, 0).await;
     let client = client();
     let peer = peer_at(&server.base, test_token("c"));
-    let receiver = peer.locations_receiver(client.transport(), test_msp());
+    let receiver = client.peer(&peer, test_msp()).locations_receiver();
     receiver
         .put_location(&test_msp(), &sample::location("LOC-NEW").expect("valid"))
         .await
@@ -469,7 +467,7 @@ async fn writing_under_another_partys_id_is_refused_with_a_404() {
     let (server, cpo) = start(100, 0).await;
     let client = client();
     let peer = peer_at(&server.base, test_token("c"));
-    let receiver = peer.locations_receiver(client.transport(), test_msp());
+    let receiver = client.peer(&peer, test_msp()).locations_receiver();
 
     // The authenticated platform speaks for DE/ABC; this writes under NL/TNM.
     let error = receiver
@@ -489,7 +487,7 @@ async fn an_object_id_that_disagrees_with_the_url_is_a_2001() {
     // Build the URL for one id but send an object with another.
     let endpoint = ocpi_kit::transport::ReceiverEndpoint::new(server.base.join("receiver").join("locations"));
     let url = endpoint.location(&test_msp(), "WRONG-ID", None, None);
-    let module = peer.module(client.transport(), ModuleId::Locations, test_msp());
+    let module = client.peer(&peer, test_msp()).module(ModuleId::Locations);
     let error =
         module.put(url, &sample::location("LOC-NEW").expect("valid")).await.expect_err("the ids disagree");
     assert_eq!(error.status_code(), StatusCode::INVALID_PARAMETERS);
@@ -502,15 +500,14 @@ async fn a_bootstrap_token_cannot_reach_a_functional_module() {
     // `test_token("a")` is registered as CREDENTIALS_TOKEN_A.
     let peer = peer_at(&server.base, test_token("a"));
 
-    let error = peer
-        .locations(client.transport(), test_msp())
+    let error = client.peer(&peer, test_msp()).locations()
         .location("LOC0")
         .await
         .expect_err("TOKEN_A is scoped to credentials and versions");
     assert_eq!(error.http_status(), 401);
 
     // The same token works on the credentials module.
-    let module = peer.module(client.transport(), ModuleId::Credentials, test_msp());
+    let module = client.peer(&peer, test_msp()).module(ModuleId::Credentials);
     let credentials: ocpi_kit::v2_3_0::credentials::Credentials =
         module.get(server.base.join("credentials")).await.expect("in scope");
     assert_eq!(credentials.roles.len(), 1);
@@ -523,7 +520,7 @@ async fn an_unknown_token_is_a_401() {
     let peer = peer_at(&server.base, CredentialsToken::new("not-a-registered-token").unwrap());
 
     let error =
-        peer.locations(client.transport(), test_msp()).location("LOC0").await.expect_err("unknown token");
+        client.peer(&peer, test_msp()).locations().location("LOC0").await.expect_err("unknown token");
     assert_eq!(error.http_status(), 401);
 }
 
@@ -532,7 +529,7 @@ async fn a_credentials_post_when_already_registered_is_a_405() {
     let (server, _cpo) = start(100, 0).await;
     let client = client();
     let peer = peer_at(&server.base, test_token("c"));
-    let module = peer.module(client.transport(), ModuleId::Credentials, test_msp());
+    let module = client.peer(&peer, test_msp()).module(ModuleId::Credentials);
 
     let credentials =
         sample::credentials("token-b", "https://msp.example.com/ocpi/versions").expect("valid sample");
@@ -548,7 +545,7 @@ async fn a_real_time_authorization_round_trips_and_an_unknown_token_is_2004() {
     let (server, _cpo) = start(100, 0).await;
     let client = client();
     let peer = peer_at(&server.base, test_token("c"));
-    let tokens = peer.tokens(client.transport(), test_cpo());
+    let tokens = client.peer(&peer, test_cpo()).tokens();
 
     let info =
         tokens.authorize("012345678", Some(TokenType::AppUser), None).await.expect("the driver may charge");
@@ -565,7 +562,7 @@ async fn the_versions_endpoints_describe_exactly_what_was_mounted() {
     let (server, _cpo) = start(100, 0).await;
     let client = client();
     let peer = peer_at(&server.base, test_token("c"));
-    let module = peer.module(client.transport(), ModuleId::Versions, test_msp());
+    let module = client.peer(&peer, test_msp()).module(ModuleId::Versions);
 
     let versions: Vec<ocpi_kit::v2_3_0::versions::Version> =
         module.get(server.base.join("versions")).await.expect("the versions endpoint");
@@ -613,7 +610,7 @@ async fn the_client_refuses_to_send_a_non_conformant_object() {
     let (server, cpo) = start(100, 0).await;
     let client = client();
     let peer = peer_at(&server.base, test_token("c"));
-    let receiver = peer.locations_receiver(client.transport(), test_msp());
+    let receiver = client.peer(&peer, test_msp()).locations_receiver();
 
     let mut location = sample::location("LOC-NEW").expect("valid sample");
     // A Location may not list `publish_allowed_to` while `publish` is true.

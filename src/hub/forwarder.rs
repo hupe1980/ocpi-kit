@@ -543,6 +543,15 @@ fn map_hub_error(error: OcpiError) -> OcpiError {
             status_code: StatusCode::CONNECTION_PROBLEM,
             status_message: Some(message.clone()),
         },
+        // The downstream party answered — it just did not answer in OCPI. Reporting that as
+        // `4003 CONNECTION_PROBLEM` tells the requesting party the hub could not reach them,
+        // which is the opposite of what happened and sends them chasing a network fault.
+        OcpiError::Status { code, body } => OcpiError::Remote {
+            status_code: StatusCode::SERVER_ERROR,
+            status_message: Some(format!(
+                "the receiving party answered HTTP {code}, which OCPI does not use: {body}"
+            )),
+        },
         _ => error,
     }
 }

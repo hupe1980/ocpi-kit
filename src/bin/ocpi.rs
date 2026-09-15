@@ -744,7 +744,7 @@ async fn pull(
     }
 
     let from: ocpi_kit::types::PartyRef = from.parse()?;
-    let client_module = peer.module(client.transport(), module.module(), from);
+    let client_module = client.peer(&peer, from).module(module.module());
     let mut stream = match module.sub_path() {
         None => client_module.list::<serde_json::Value>(query)?,
         Some(segment) => {

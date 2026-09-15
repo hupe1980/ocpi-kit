@@ -222,11 +222,42 @@ pub enum OcpiError {
 
     /// The transport failed: connection refused, TLS failure, non-JSON body.
     ///
-    /// A **timeout** is [`OcpiError::Timeout`] instead, because a hub has to answer the two
-    /// differently and telling them apart by reading the message is not something a protocol
-    /// implementation should be doing.
+    /// **Nothing reached the peer's OCPI layer**, so whatever was being sent is still owed.
+    ///
+    /// A **timeout** is [`OcpiError::Timeout`] instead, and a peer that *answered* with an HTTP
+    /// status the specification does not name is [`OcpiError::Status`] — because a hub has to
+    /// answer the three differently and telling them apart by reading a message string is not
+    /// something a protocol implementation should be doing. See
+    /// [`was_answered`](Self::was_answered).
     #[error("transport error: {0}")]
     Transport(String),
+
+    /// The peer answered with an HTTP status the specification does not name.
+    ///
+    /// OCPI uses exactly five HTTP error statuses — `400`, `401`, `403`, `404` and `405` — and
+    /// puts everything else in the envelope's own `status_code`. A peer answering `422`, `409`,
+    /// `429` or `500` is outside the protocol, and this variant carries what it said.
+    ///
+    /// **The distinction this exists for.** A sender draining a queue of CDRs has to tell two
+    /// opposite facts apart, and there is no third reading:
+    ///
+    /// * the receiver **answered** — the document has been judged, it is out of the queue, and
+    ///   re-sending it will be refused again;
+    /// * nobody answered ([`Transport`](Self::Transport), [`Timeout`](Self::Timeout)) — the
+    ///   document is still owed, and sending it again is safe, because a CDR is keyed and the
+    ///   receiver de-duplicates.
+    ///
+    /// Reading the first as the second retries a document a partner has already rejected, for
+    /// ever. Reading the second as the first drops a record nobody ever received. Both were
+    /// reachable while this was a [`Transport`](Self::Transport) with an `HTTP 422:` prefix that
+    /// a caller had to parse back out.
+    #[error("the peer answered HTTP {code}: {body}")]
+    Status {
+        /// The HTTP status the peer answered with.
+        code: u16,
+        /// The start of the body it sent, for a person reading a log.
+        body: String,
+    },
 
     /// The peer did not answer within the configured timeout.
     ///
@@ -282,9 +313,14 @@ impl OcpiError {
             | Self::TokenAOutOfScope
             | Self::NotFound(_)
             | Self::MethodNotAllowed(_) => StatusCode::CLIENT_ERROR,
-            Self::Transport(_) | Self::Timeout(_) | Self::UrlRefused { .. } | Self::Unsupported(_) => {
-                StatusCode::SERVER_ERROR
-            }
+            // The peer answered outside the protocol. A `4xx` is its judgement on what we sent,
+            // which is a client error; a `5xx` is its own failure.
+            Self::Status { code, .. } if *code < 500 => StatusCode::CLIENT_ERROR,
+            Self::Status { .. }
+            | Self::Transport(_)
+            | Self::Timeout(_)
+            | Self::UrlRefused { .. }
+            | Self::Unsupported(_) => StatusCode::SERVER_ERROR,
         }
     }
 
@@ -329,11 +365,34 @@ impl OcpiError {
     pub fn is_transient(&self) -> bool {
         match self {
             Self::Transport(_) | Self::Timeout(_) => true,
+            // The peer answered. `5xx` and `429` say "not now"; every other status is a judgement
+            // on the document, and repeating it produces the same judgement.
+            Self::Status { code, .. } => *code >= 500 || *code == 429,
             Self::Remote { status_code, .. } => {
                 matches!(status_code.class(), StatusClass::ServerError | StatusClass::HubError)
             }
             _ => false,
         }
+    }
+
+    /// Whether the peer answered at all, however badly.
+    ///
+    /// `false` only for a failure on this side of the wire: a dead socket, a timeout, a URL the
+    /// policy refused, a document this build could not encode. Everything else means the peer
+    /// received the request and formed a response to it.
+    ///
+    /// This is the question a sender asks before deciding whether a document is still owed. See
+    /// [`Status`](Self::Status).
+    #[must_use]
+    pub const fn was_answered(&self) -> bool {
+        !matches!(
+            self,
+            Self::Transport(_)
+                | Self::Timeout(_)
+                | Self::UrlRefused { .. }
+                | Self::Unsupported(_)
+                | Self::Invalid(_)
+        )
     }
 
     /// Renders this error as the envelope a server should send back.
@@ -407,6 +466,11 @@ mod tests {
         assert!(!unroutable.is_transient());
         assert_eq!(OcpiError::Transport("timeout".into()).http_status(), 200);
         assert_eq!(
+            OcpiError::Status { code: 422, body: String::new() }.http_status(),
+            200,
+            "a peer's non-OCPI status is still reported inside our own envelope"
+        );
+        assert_eq!(
             OcpiError::Remote { status_code: StatusCode::HUB_ERROR, status_message: None }.http_status(),
             200
         );
@@ -420,5 +484,20 @@ mod tests {
         let permanent = OcpiError::Remote { status_code: StatusCode::UNKNOWN_TOKEN, status_message: None };
         assert!(!permanent.is_transient());
         assert!(OcpiError::Transport("reset".into()).is_transient());
+
+        // The two opposite facts a sender draining a queue acts on.
+        let judged = OcpiError::Status { code: 422, body: "periods do not sum".into() };
+        assert!(judged.was_answered(), "the receiver formed a response to this document");
+        assert!(!judged.is_transient(), "re-sending it earns the same judgement");
+        for unreachable in [OcpiError::Transport("reset".into()), OcpiError::Timeout("t".into())] {
+            assert!(!unreachable.was_answered(), "nothing reached the peer, so it is still owed");
+            assert!(unreachable.is_transient());
+        }
+        assert!(
+            OcpiError::Status { code: 503, body: String::new() }.is_transient(),
+            "a 5xx says not now, not no"
+        );
+        assert!(OcpiError::Status { code: 429, body: String::new() }.is_transient());
+        assert!(!OcpiError::Status { code: 409, body: String::new() }.is_transient());
     }
 }

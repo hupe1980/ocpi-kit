@@ -17,17 +17,21 @@
 //!
 //! See [`validate`] for why.
 
-pub mod cistring;
-pub mod datetime;
-pub mod display_text;
-pub mod extensions;
-pub mod ids;
-pub mod local;
-pub mod number;
-pub mod open_enum;
-pub mod string;
-pub mod url;
-pub mod validate;
+// The submodules are private and every public item is re-exported here, so each type has exactly
+// **one** path: `types::Number`, never also `types::number::Number`. Two paths to one item is two
+// things semver has to protect, two spellings in the wild, and a rustdoc page that is canonical in
+// the place nobody links to.
+mod cistring;
+mod datetime;
+mod display_text;
+mod extensions;
+mod ids;
+mod local;
+mod number;
+mod open_enum;
+mod string;
+mod url;
+mod validate;
 
 mod text;
 

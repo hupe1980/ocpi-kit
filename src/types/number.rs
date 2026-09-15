@@ -107,6 +107,16 @@ impl Number {
         self.0.is_sign_negative() && !self.0.is_zero()
     }
 
+    /// Whether the value is strictly positive.
+    ///
+    /// The counterpart of [`is_negative`](Self::is_negative). Both exclude zero, so
+    /// `is_positive`, `is_negative` and [`is_zero`](Self::is_zero) partition every value — which
+    /// is what lets a sign comparison be written without a three-way `match` on an ordering.
+    #[must_use]
+    pub fn is_positive(self) -> bool {
+        !self.0.is_sign_negative() && !self.0.is_zero()
+    }
+
     /// The absolute value.
     #[must_use]
     pub fn abs(self) -> Self {

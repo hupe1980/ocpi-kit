@@ -1283,108 +1283,144 @@ impl<'a> PaymentsClient<'a> {
 }
 
 /// Convenience constructors hanging off a [`Peer`].
-impl Peer {
-    /// A client for an arbitrary module.
+/// Everything one party can call on one registered peer.
+///
+/// Every OCPI call needs three things that do not change between calls: the HTTP transport, the
+/// peer that was registered, and which of your own parties is making the request. Threading those
+/// through each call — `peer.locations(client.transport(), me)` — puts the least interesting
+/// arguments in front of the interesting ones and repeats them at every call site. A session
+/// binds them once:
+///
+/// ```no_run
+/// # use ocpi_kit::client::{OcpiClient, Peer};
+/// # use ocpi_kit::transport::CredentialsToken;
+/// # async fn f(peer: Peer) -> Result<(), Box<dyn std::error::Error>> {
+/// let client = OcpiClient::new()?;
+/// let cpo = client.peer(&peer, "NL/TNM".parse()?);
+///
+/// let location = cpo.locations().location("LOC1").await?;
+/// let tariffs = cpo.tariffs().list(Default::default())?;
+/// # Ok(()) }
+/// ```
+///
+/// A session borrows the client and the peer, so it costs nothing to make and one can be made per
+/// request. To address a message **through a hub**, or to send an Open Routing Request, reach for
+/// the module client's own [`to`](ModuleClient::to) and
+/// [`open_routing`](ModuleClient::open_routing).
+#[derive(Clone, Debug)]
+pub struct PeerSession<'a> {
+    transport: &'a Transport,
+    peer: &'a Peer,
+    from: PartyRef,
+}
+
+impl<'a> PeerSession<'a> {
+    /// Binds a transport, a peer and the party making the requests.
+    ///
+    /// `from` is taken by value so a session can be bound to a local without the caller having to
+    /// keep a `PartyRef` alive alongside it. A `PartyRef` is two short strings; cloning one per
+    /// call is not measurable beside the HTTP request it accompanies.
     #[must_use]
-    pub fn module<'a>(
-        &'a self,
-        transport: &'a Transport,
-        module: ModuleId,
-        from: PartyRef,
-    ) -> ModuleClient<'a> {
-        ModuleClient::new(transport, self, module, from)
+    pub const fn new(transport: &'a Transport, peer: &'a Peer, from: PartyRef) -> Self {
+        Self { transport, peer, from }
+    }
+
+    /// The peer these calls go to.
+    #[must_use]
+    pub const fn peer(&self) -> &'a Peer {
+        self.peer
+    }
+
+    /// The party these calls are made as.
+    #[must_use]
+    pub const fn from(&self) -> &PartyRef {
+        &self.from
+    }
+
+    /// An untyped client for any module and interface, for a module with no typed client yet.
+    #[must_use]
+    pub fn module(&self, module: ModuleId) -> ModuleClient<'a> {
+        ModuleClient::new(self.transport, self.peer, module, self.from.clone())
     }
 
     /// The Locations Sender client: pull Locations from this peer.
     #[must_use]
-    pub fn locations<'a>(&'a self, transport: &'a Transport, from: PartyRef) -> LocationsSender<'a> {
-        LocationsSender::new(self.module(transport, ModuleId::Locations, from))
+    pub fn locations(&self) -> LocationsSender<'a> {
+        LocationsSender::new(self.module(ModuleId::Locations))
     }
 
     /// The Locations Receiver client: push Locations to this peer.
     #[must_use]
-    pub fn locations_receiver<'a>(
-        &'a self,
-        transport: &'a Transport,
-        from: PartyRef,
-    ) -> LocationsReceiver<'a> {
-        LocationsReceiver::new(self.module(transport, ModuleId::Locations, from))
+    pub fn locations_receiver(&self) -> LocationsReceiver<'a> {
+        LocationsReceiver::new(self.module(ModuleId::Locations))
     }
 
     /// The Tokens Sender client: pull Tokens from, and authorize against, this peer.
     #[must_use]
-    pub fn tokens<'a>(&'a self, transport: &'a Transport, from: PartyRef) -> TokensSender<'a> {
-        TokensSender::new(self.module(transport, ModuleId::Tokens, from))
-    }
-
-    /// The CDRs client.
-    #[must_use]
-    pub fn cdrs<'a>(&'a self, transport: &'a Transport, from: PartyRef) -> CdrsClient<'a> {
-        CdrsClient::new(self.module(transport, ModuleId::Cdrs, from))
+    pub fn tokens(&self) -> TokensSender<'a> {
+        TokensSender::new(self.module(ModuleId::Tokens))
     }
 
     /// The Tokens Receiver client: push Tokens to this peer.
     #[must_use]
-    pub fn tokens_receiver<'a>(&'a self, transport: &'a Transport, from: PartyRef) -> TokensReceiver<'a> {
-        TokensReceiver::new(self.module(transport, ModuleId::Tokens, from))
+    pub fn tokens_receiver(&self) -> TokensReceiver<'a> {
+        TokensReceiver::new(self.module(ModuleId::Tokens))
+    }
+
+    /// The CDRs client.
+    #[must_use]
+    pub fn cdrs(&self) -> CdrsClient<'a> {
+        CdrsClient::new(self.module(ModuleId::Cdrs))
     }
 
     /// The Sessions Sender client: pull Sessions from this peer.
     #[must_use]
-    pub fn sessions<'a>(&'a self, transport: &'a Transport, from: PartyRef) -> SessionsSender<'a> {
-        SessionsSender::new(self.module(transport, ModuleId::Sessions, from))
+    pub fn sessions(&self) -> SessionsSender<'a> {
+        SessionsSender::new(self.module(ModuleId::Sessions))
     }
 
     /// The Sessions Receiver client: push Sessions to this peer.
     #[must_use]
-    pub fn sessions_receiver<'a>(&'a self, transport: &'a Transport, from: PartyRef) -> SessionsReceiver<'a> {
-        SessionsReceiver::new(self.module(transport, ModuleId::Sessions, from))
+    pub fn sessions_receiver(&self) -> SessionsReceiver<'a> {
+        SessionsReceiver::new(self.module(ModuleId::Sessions))
     }
 
     /// The Tariffs Sender client: pull Tariffs from this peer.
     #[must_use]
-    pub fn tariffs<'a>(&'a self, transport: &'a Transport, from: PartyRef) -> TariffsSender<'a> {
-        TariffsSender::new(self.module(transport, ModuleId::Tariffs, from))
+    pub fn tariffs(&self) -> TariffsSender<'a> {
+        TariffsSender::new(self.module(ModuleId::Tariffs))
     }
 
     /// The Tariffs Receiver client: push Tariffs to this peer.
     #[must_use]
-    pub fn tariffs_receiver<'a>(&'a self, transport: &'a Transport, from: PartyRef) -> TariffsReceiver<'a> {
-        TariffsReceiver::new(self.module(transport, ModuleId::Tariffs, from))
+    pub fn tariffs_receiver(&self) -> TariffsReceiver<'a> {
+        TariffsReceiver::new(self.module(ModuleId::Tariffs))
     }
 
     /// The Commands client.
     #[must_use]
-    pub fn commands<'a>(&'a self, transport: &'a Transport, from: PartyRef) -> CommandsClient<'a> {
-        CommandsClient::new(self.module(transport, ModuleId::Commands, from))
+    pub fn commands(&self) -> CommandsClient<'a> {
+        CommandsClient::new(self.module(ModuleId::Commands))
     }
 
     /// The Charging Profiles client.
     #[must_use]
-    pub fn charging_profiles<'a>(
-        &'a self,
-        transport: &'a Transport,
-        from: PartyRef,
-    ) -> ChargingProfilesClient<'a> {
-        ChargingProfilesClient::new(self.module(transport, ModuleId::ChargingProfiles, from))
+    pub fn charging_profiles(&self) -> ChargingProfilesClient<'a> {
+        ChargingProfilesClient::new(self.module(ModuleId::ChargingProfiles))
     }
 
     /// The Hub Client Info client.
     #[must_use]
-    pub fn hub_client_info<'a>(
-        &'a self,
-        transport: &'a Transport,
-        from: PartyRef,
-    ) -> HubClientInfoClient<'a> {
-        HubClientInfoClient::new(self.module(transport, ModuleId::HubClientInfo, from))
+    pub fn hub_client_info(&self) -> HubClientInfoClient<'a> {
+        HubClientInfoClient::new(self.module(ModuleId::HubClientInfo))
     }
 
     /// The Payments client.
     #[cfg(feature = "payments")]
     #[cfg_attr(docsrs, doc(cfg(feature = "payments")))]
     #[must_use]
-    pub fn payments<'a>(&'a self, transport: &'a Transport, from: PartyRef) -> PaymentsClient<'a> {
-        PaymentsClient::new(self.module(transport, ModuleId::Payments, from))
+    pub fn payments(&self) -> PaymentsClient<'a> {
+        PaymentsClient::new(self.module(ModuleId::Payments))
     }
 }
 

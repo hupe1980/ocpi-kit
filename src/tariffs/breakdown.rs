@@ -203,14 +203,34 @@ pub enum PricingNoteCode {
     PeriodsOutOfOrder,
     /// A `min_price` or `max_price` moved the total, and the tax lines were moved with it.
     TotalClamped,
-    /// The tax the tariff describes came out negative.
+    /// The tax the tariff describes runs against the sign of the amount it is charged on.
     ///
-    /// No tariff can mean that: a VAT percentage below zero is a malformed
-    /// [`PriceComponent`](crate::v2_3_0::tariffs::PriceComponent), which
-    /// [`Validate`](crate::types::Validate) reports. The engine does not require validated input,
-    /// so rather than publish a session that costs less with tax than without, it holds the
-    /// inclusive total at the exclusive one and says why.
+    /// Tax follows its base: a positive total owes positive tax, and a credit — a negative total,
+    /// which a V2G or refund component produces — owes negative tax. A breakdown where the two
+    /// disagree in sign is not a document anybody can use, and the cause is a VAT percentage
+    /// below zero, which [`Validate`](crate::types::Validate) reports on the component. The engine
+    /// does not require validated input, so it holds the inclusive total at the exclusive one and
+    /// says why.
+    ///
+    /// This is deliberately **not** raised for a negative total with negative tax: a credit note
+    /// of −€2.50 net at 21% is −€3.03 gross, and reporting −€2.50 for both would drop the tax off
+    /// a refund.
     NegativeTax,
+    /// A price limit moved the total, and the tax on the amount it moved to is not derivable.
+    ///
+    /// A `min_price` that lifts a session which metered nothing has no tax to scale: there are no
+    /// priced segments, so no rate was applied to anything. Where the Tariff names exactly one VAT
+    /// percentage across its price components the engine uses that; where it names several, or
+    /// none, the rate on the clamped amount is a fact the Tariff does not carry, and inventing one
+    /// would put a number somebody files behind a guess.
+    ClampedTaxNotDerivable,
+    /// A price limit's `after_taxes` bound cannot hold together with the pre-tax total.
+    ///
+    /// A `max_price.after_taxes` below the session's pre-tax total would require negative tax to
+    /// satisfy. The bound is what the Tariff states, so it governs both totals: the pre-tax total
+    /// is brought down to it as well, and this note records that the Tariff asked for something
+    /// arithmetically impossible.
+    ContradictoryPriceLimit,
     /// Tax was owed that no rate in the session accounts for.
     ///
     /// Raised when a `min_price.after_taxes` lifts the inclusive total of a session whose price
@@ -247,6 +267,8 @@ impl PricingNoteCode {
             Self::PeriodSpansPriceChange => "period_spans_price_change",
             Self::TotalClamped => "total_clamped",
             Self::NegativeTax => "negative_tax",
+            Self::ClampedTaxNotDerivable => "clamped_tax_not_derivable",
+            Self::ContradictoryPriceLimit => "contradictory_price_limit",
             Self::UnattributedTax => "unattributed_tax",
             Self::TaxIncludedWithoutRate => "tax_included_without_rate",
             Self::TaxRateIgnored => "tax_rate_ignored",
@@ -363,6 +385,16 @@ impl CostBreakdown {
     #[must_use]
     pub fn total_vat(&self) -> Number {
         self.taxes.iter().map(|t| t.amount).sum()
+    }
+
+    /// Whether any note carries this code.
+    ///
+    /// The question a reconciliation run asks per CDR — *"did this one span a price change?"* —
+    /// without allocating or matching on message text ([`PricingNoteCode`] is the stable part;
+    /// the sentence beside it is not).
+    #[must_use]
+    pub fn has_note(&self, code: PricingNoteCode) -> bool {
+        self.notes.iter().any(|n| n.code == code)
     }
 
     /// The notes carrying `code`.

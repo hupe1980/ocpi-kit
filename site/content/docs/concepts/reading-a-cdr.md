@@ -80,7 +80,7 @@ let key = ContractIdParts::normalise(cdr.cdr_token.contract_id.as_str());
 
 `None` means the id does not follow the format, which an eMSP is free to do — treat that as "not
 comparable", not as "no match". The format has no marker, so any string of the right shape parses;
-[the API docs](https://docs.rs/ocpi-kit/latest/ocpi_kit/types/struct.ContractIdParts.html) are
+[the API docs](https://docs.rs/ocpi-kit/latest/ocpi_kit/types/index.html) are
 blunt about what that does and does not tell you.
 
 **`auth_method` is not part of the identity.** It records *how* the session was authorised —

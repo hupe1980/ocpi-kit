@@ -27,7 +27,7 @@ So they translate at the edge:
 
 ```rust
 // The peer registered as OCPI 2.2.1. Nothing below says so.
-let mut tariffs = peer.tariffs(client.transport(), me).list(PageQuery::new())?;
+let mut tariffs = client.peer(&peer, me).tariffs().list(PageQuery::new())?;
 while let Some(tariff) = tariffs.next().await? {
     assert_eq!(tariff.tax_included, TaxIncluded::No);   // a v2_3_0 Tariff
 }

@@ -17,7 +17,7 @@ assert_eq!(breakdown.total_incl_vat.to_string(), "5.50");
 
 ## What makes this engine different
 
-**The answer is auditable.** `CostBreakdown` does not just say `12.28`. It says, for each
+**The answer is auditable.** `CostBreakdown` does not just say `12.375`. It says, for each
 dimension, which quantity was billed, what `step_size` did to it, which Tariff Element and which
 Price Component priced it, and *why that element was selected*:
 

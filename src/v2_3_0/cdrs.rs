@@ -810,6 +810,31 @@ impl Validate for SignedValue {
 ocpi_lenient_enum! {
     /// How the driver was authenticated for a session.
     ///
+    /// # A decision input, and lenient anyway
+    ///
+    /// `auth_method` is the only field on a CDR that says whether the provider was asked, so it
+    /// decides which party is invoiced. `WHITELIST` asserts nobody was asked and `AUTH_REQUEST`
+    /// asserts somebody was — each a positive claim about a different company, with no weakest
+    /// value to fall back to.
+    ///
+    /// It is lenient regardless, because closing it would make one unrecognised value cost the
+    /// whole page the CDR arrived on. So **branch on [`is_known`](AuthMethod::is_known) before
+    /// matching**, and refuse the record by name rather than letting a wildcard arm pick a party
+    /// to bill:
+    ///
+    /// ```
+    /// # use ocpi_kit::v2_3_0::cdrs::{AuthMethod, Cdr};
+    /// # fn invoice(_: &Cdr) {}
+    /// # fn quarantine(_: &Cdr, _: &str) {}
+    /// # fn settle(cdr: &Cdr) {
+    /// if !cdr.auth_method.is_known() {
+    ///     quarantine(cdr, cdr.auth_method.as_str());
+    ///     return;
+    /// }
+    /// invoice(cdr);
+    /// # }
+    /// ```
+    ///
     /// Spec: 2.3.0 §mod_cdrs_authmethod_enum
     pub enum AuthMethod {
         /// An authentication request was sent to the eMSP.

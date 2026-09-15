@@ -7,7 +7,7 @@
 //!
 //! # What makes this engine different
 //!
-//! **The answer is auditable.** [`CostBreakdown`] does not just say `12.28`; it says which
+//! **The answer is auditable.** [`CostBreakdown`] does not just say `12.375`; it says which
 //! quantity was billed for each dimension, what `step_size` did to it, which Tariff Element and
 //! which Price Component priced it, and why that element was selected.
 //!
@@ -1469,6 +1469,124 @@ mod tests {
         let exact = ocpi_3_style.price(&session, &[t]).unwrap();
         assert_eq!(exact.dimension(TariffDimensionType::Energy).unwrap().billed, n("5.4"));
         assert_eq!(exact.total_excl_vat, n("1.35"));
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Price limits and the sign of tax — the three cases where the invariant held and the
+    // document was still wrong.
+    // ---------------------------------------------------------------------------------------
+
+    /// A `min_price` that lifts a session which metered nothing used to publish a total with no
+    /// tax on it at all — a €5.00 minimum charge under a 21% tariff reported €5.00 incl. VAT.
+    /// There is no priced segment to take a rate from, but the Tariff names exactly one.
+    #[test]
+    fn a_minimum_charge_on_an_unmetered_session_still_carries_the_tariffs_one_rate() {
+        let mut t =
+            tariff(vec![element(vec![component(TariffDimensionType::Energy, "0.25", Some("21"), 1)])]);
+        t.min_price = Some(PriceLimit {
+            before_taxes: n("5.00"),
+            after_taxes: None,
+            extensions: crate::types::Extensions::new(),
+        });
+        let session =
+            PricedSession::new(dt("2024-01-15T10:00:00Z"), TimeZone::utc()).with_period(PricedPeriod {
+                energy_kwh: Number::ZERO,
+                ..PricedPeriod::new(dt("2024-01-15T10:00:00Z"))
+            });
+        let b = PricingEngine::new().price(&session, &[t]).unwrap();
+        assert_eq!(b.total_excl_vat, n("5.00"));
+        assert_eq!(b.total_incl_vat, n("6.05"));
+        // And the line names the rate rather than reporting an unattributed amount.
+        assert_eq!(b.taxes.len(), 1);
+        assert_eq!(b.taxes[0].percentage, Some(n("21")));
+        assert!(!b.has_note(PricingNoteCode::UnattributedTax));
+    }
+
+    /// Where the Tariff's components disagree about the rate there is nothing to derive, and
+    /// inventing one would put a guess in a document somebody files.
+    #[test]
+    fn a_minimum_charge_says_so_when_the_rate_is_not_derivable() {
+        // Two rates and nothing metered: a FLAT would be charged even on an empty session, so
+        // the two components here are both quantity-driven and both zero.
+        let mut t = tariff(vec![element(vec![
+            component(TariffDimensionType::Energy, "0.25", Some("21"), 1),
+            component(TariffDimensionType::Time, "1.00", Some("6"), 1),
+        ])]);
+        t.min_price = Some(PriceLimit {
+            before_taxes: n("5.00"),
+            after_taxes: None,
+            extensions: crate::types::Extensions::new(),
+        });
+        let session =
+            PricedSession::new(dt("2024-01-15T10:00:00Z"), TimeZone::utc()).with_period(PricedPeriod {
+                energy_kwh: Number::ZERO,
+                ..PricedPeriod::new(dt("2024-01-15T10:00:00Z"))
+            });
+        let b = PricingEngine::new().price(&session, &[t]).unwrap();
+        assert_eq!(b.total_excl_vat, n("5.00"));
+        assert_eq!(b.total_incl_vat, n("5.00"));
+        assert!(b.has_note(PricingNoteCode::ClampedTaxNotDerivable));
+    }
+
+    /// An `after_taxes` cap below the pre-tax total used to be discarded silently, publishing a
+    /// total far above the maximum the Tariff states. The bound governs both totals instead.
+    #[test]
+    fn an_after_tax_cap_below_the_pre_tax_total_governs_both() {
+        let mut t =
+            tariff(vec![element(vec![component(TariffDimensionType::Energy, "1.00", Some("21"), 1)])]);
+        t.max_price = Some(PriceLimit {
+            before_taxes: n("1000"),
+            after_taxes: Some(n("5.00")),
+            extensions: crate::types::Extensions::new(),
+        });
+        let session =
+            PricedSession::new(dt("2024-01-15T10:00:00Z"), TimeZone::utc()).with_period(PricedPeriod {
+                energy_kwh: n("100"),
+                ..PricedPeriod::new(dt("2024-01-15T10:00:00Z"))
+            });
+        let b = PricingEngine::new().price(&session, &[t]).unwrap();
+        assert_eq!(b.total_incl_vat, n("5.00"), "the cap the tariff published must hold");
+        assert!(b.total_excl_vat <= b.total_incl_vat);
+        assert!(b.has_note(PricingNoteCode::ContradictoryPriceLimit));
+    }
+
+    /// A credit — a refund, or energy fed back — is a negative total, and its tax is negative
+    /// too. Holding the inclusive total at the exclusive one, which is what a bare `incl < excl`
+    /// check does, drops the VAT off every refund.
+    #[test]
+    fn a_credit_keeps_its_tax_instead_of_being_read_as_a_negative_rate() {
+        let t =
+            tariff(vec![element(vec![component(TariffDimensionType::Energy, "-0.25", Some("21"), 1)])]);
+        let session =
+            PricedSession::new(dt("2024-01-15T10:00:00Z"), TimeZone::utc()).with_period(PricedPeriod {
+                energy_kwh: n("10"),
+                ..PricedPeriod::new(dt("2024-01-15T10:00:00Z"))
+            });
+        let b = PricingEngine::new().price(&session, &[t]).unwrap();
+        assert_eq!(b.total_excl_vat, n("-2.50"));
+        assert_eq!(b.total_incl_vat, n("-3.03"));
+        assert!(!b.has_note(PricingNoteCode::NegativeTax));
+        let sum: Number = b.taxes.iter().map(|l| l.amount).sum();
+        assert_eq!(sum, b.total_incl_vat - b.total_excl_vat);
+    }
+
+    /// A genuinely negative rate still is one, on either sign of base.
+    #[test]
+    fn a_negative_vat_percentage_is_still_refused() {
+        let t = tariff(vec![element(vec![component(
+            TariffDimensionType::Energy,
+            "1.00",
+            Some("-21"),
+            1,
+        )])]);
+        let session =
+            PricedSession::new(dt("2024-01-15T10:00:00Z"), TimeZone::utc()).with_period(PricedPeriod {
+                energy_kwh: n("10"),
+                ..PricedPeriod::new(dt("2024-01-15T10:00:00Z"))
+            });
+        let b = PricingEngine::new().price(&session, &[t]).unwrap();
+        assert!(b.has_note(PricingNoteCode::NegativeTax));
+        assert_eq!(b.total_incl_vat, b.total_excl_vat);
     }
 
     #[test]

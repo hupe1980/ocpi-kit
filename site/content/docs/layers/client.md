@@ -35,7 +35,8 @@ implementation knows whether a peer is already registered.
 ## Typed module clients
 
 ```rust
-let locations = peer.locations(client.transport(), me);
+let cpo = client.peer(&peer, me);
+let locations = cpo.locations();
 let one = locations.get("LOC1").await?;
 let mut all = locations.list(PageQuery::new())?;
 ```
@@ -57,19 +58,19 @@ See [Versions and conversion](@/docs/concepts/versions.md).
 `ModuleClient`'s own `get`/`put`/`post`/`patch`/`list` are the escape hatch: they decode exactly the
 type you name and translate nothing.
 
-There is a typed client for every module the crate models a protocol for:
+A `PeerSession` — `client.peer(&peer, me)`, bound once — gives a typed client for every module the crate models a protocol for:
 
 | | |
 |---|---|
-| `peer.locations(…)` / `peer.locations_receiver(…)` | pull Locations, push Locations |
-| `peer.sessions(…)` / `peer.sessions_receiver(…)` | pull Sessions and set charging preferences, push Sessions |
-| `peer.cdrs(…)` | pull CDRs, and `POST` one (the module returns its URL in a `Location` header) |
-| `peer.tariffs(…)` / `peer.tariffs_receiver(…)` | pull Tariffs, push and `DELETE` them |
-| `peer.tokens(…)` / `peer.tokens_receiver(…)` | pull Tokens and authorize in real time, push Tokens |
-| `peer.commands(…)` | send a command, and await its result at a URL you serve |
-| `peer.charging_profiles(…)` | set, read and clear a profile on a session |
-| `peer.hub_client_info(…)` | who a hub says is connected |
-| `peer.payments(…)` | terminals and financial advice confirmations, from either side. Needs the `payments` feature: Payments is a 2.3.0 release branch, not core |
+| `cpo.locations()` / `cpo.locations_receiver()` | pull Locations, push Locations |
+| `cpo.sessions()` / `cpo.sessions_receiver()` | pull Sessions and set charging preferences, push Sessions |
+| `cpo.cdrs()` | pull CDRs, and `POST` one (the module returns its URL in a `Location` header) |
+| `cpo.tariffs()` / `cpo.tariffs_receiver()` | pull Tariffs, push and `DELETE` them |
+| `cpo.tokens()` / `cpo.tokens_receiver()` | pull Tokens and authorize in real time, push Tokens |
+| `cpo.commands()` | send a command, and await its result at a URL you serve |
+| `cpo.charging_profiles()` | set, read and clear a profile on a session |
+| `cpo.hub_client_info()` | who a hub says is connected |
+| `cpo.payments()` | terminals and financial advice confirmations, from either side. Needs the `payments` feature: Payments is a 2.3.0 release branch, not core |
 
 Anything else — the `bookings` and `invoicereconciliation` extension modules, or a peer's vendor
 module — goes through `peer.module(…)`, the untyped `ModuleClient`, which still gives you the

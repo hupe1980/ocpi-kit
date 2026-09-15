@@ -284,7 +284,7 @@ element.
 
 ## Everything else
 
-574 tests across twelve targets, under three feature sets on three platforms.
+584 tests across twelve targets, under three feature sets on three platforms.
 
 * Clippy at `pedantic` with `-D warnings`, under three feature sets.
 * Every feature, and every pair of layer features, compiled — this is what catches a layer using a

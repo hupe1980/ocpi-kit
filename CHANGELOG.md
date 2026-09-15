@@ -4,7 +4,63 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.3.0] — unreleased
+## [0.4.0] — unreleased
+
+Four defects in the pricing engine's money path, one in the hub's error mapping, and one breaking
+simplification of the client API. Every fix has a regression test naming what it used to publish.
+
+### Fixed
+
+- **Money.** A `min_price` lifting a session that metered nothing reported €5.00 *including* 21%
+  VAT — a total asserting no tax was due. The rate now comes from the Tariff where its components
+  agree on one, and `ClampedTaxNotDerivable` says so where they do not.
+- **Money.** A `max_price.after_taxes` below the pre-tax total was discarded, publishing a total
+  above the tariff's own maximum. The bound now governs both totals (`ContradictoryPriceLimit`).
+- **Money.** A credit — a refund, or energy fed back — lost its tax: every `incl < excl` was read
+  as a negative VAT percentage. Tax now follows the sign of its base, so −€2.50 net at 21% is
+  −€3.03 gross.
+- **Money.** Price limits were applied while the totals were still being assembled, so a later step
+  could carry a total back across a bound already checked. They are now applied once, to the
+  finished totals; the malformed-tax check moved to the price components, where it belongs.
+- **Hub.** A downstream party answering with a non-OCPI HTTP status was reported as
+  `4003 CONNECTION_PROBLEM` — "could not reach them" — when it had answered and judged the
+  document. It is now a `3000` naming the status.
+
+### Added
+
+- `OcpiError::Status { code, body }` for a peer that answered outside the five statuses OCPI uses.
+  This was `OcpiError::Transport`, documented as *"never reached the OCPI layer"* — two opposite
+  facts in one variant, told apart by parsing an `HTTP 422:` prefix out of a string. They decide
+  whether a queued document is still owed. `was_answered()` asks the question; `is_transient()` is
+  now true only for a `5xx` or a `429`.
+- `CostBreakdown::has_note(code)`, `Number::is_positive()`.
+- `AuthMethod` documents that it is a decision input — it decides which party is invoiced — and
+  that a consumer should branch on `is_known()` before matching. It stays lenient: closing it would
+  cost the whole page one unrecognised value arrived on.
+
+### Changed
+
+- **Breaking.** The fourteen `Peer::locations(…)`, `Peer::tokens(…)` … accessors become one
+  `OcpiClient::peer(&peer, from)` returning a `PeerSession`:
+
+  ```diff
+  - let location = peer.locations(client.transport(), me).location("LOC1").await?;
+  + let location = client.peer(&peer, me).locations().location("LOC1").await?;
+  ```
+
+- **Breaking.** The submodules of `types` and `transport` are private. Every item was already
+  re-exported, so each type now has one path (`types::Number`, not also `types::number::Number`)
+  instead of two for semver to protect.
+
+### Testing
+
+- The pricing properties are rewritten around the degenerate outputs they must reject. `any_price()`
+  may now be negative; the property asserting the totals were never negative is gone, because that
+  is not true of this domain and asserting it hid the credit bug. Three replace it: tax follows the
+  sign of its base, the totals never fall outside the tariff's limits, and charged tax is never
+  silently dropped. The second found a further defect within a hundred cases. All pass at 100,000.
+
+## [0.3.0] — 2026-09-04
 
 An audit release. Every entry below is something the crate got wrong, or something it did not
 check, found by re-reading the specification against the code rather than by a bug report.

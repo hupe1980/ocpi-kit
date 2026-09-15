@@ -259,7 +259,11 @@ impl Transport {
                 401 => OcpiError::Unauthorized(preview(&bytes)),
                 404 => OcpiError::NotFound(request.url.as_str().to_owned()),
                 405 => OcpiError::MethodNotAllowed(request.url.as_str().to_owned()),
-                other => OcpiError::Transport(format!("HTTP {other}: {}", preview(&bytes))),
+                // The peer answered, outside the five statuses the specification names. That is
+                // a different fact from "nothing reached them", and a sender draining a queue
+                // acts on it differently — so it gets its own variant rather than a string with
+                // an `HTTP 422:` prefix that a caller has to parse back out.
+                other => OcpiError::Status { code: other, body: preview(&bytes) },
             });
         }
 

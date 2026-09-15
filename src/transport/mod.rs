@@ -17,15 +17,17 @@
 //!
 //! Spec: 2.3.0 §transport_and_format_transport_and_format, §status_codes_status_codes
 
-pub mod auth;
-pub mod endpoints;
-pub mod envelope;
+// Private, with every item re-exported here, so each type has one path. `headers` stays public
+// because its header-name constants are a namespace rather than a duplicate.
+mod auth;
+mod endpoints;
+mod envelope;
 pub mod headers;
-pub mod pagination;
-pub mod patch;
-pub mod quirks;
-pub mod routing;
-pub mod status;
+mod pagination;
+mod patch;
+mod quirks;
+mod routing;
+mod status;
 
 pub use auth::{CredentialsToken, InvalidToken, TOKEN_PREFIX, TokenRole};
 pub use endpoints::{ReceiverEndpoint, SenderEndpoint};
