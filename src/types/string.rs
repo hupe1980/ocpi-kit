@@ -57,7 +57,7 @@ impl<const N: usize> OcpiString<N> {
 
     /// Creates an `OcpiString` without enforcing anything.
     ///
-    /// This is what `Deserialize` uses; see [`types::validate`](super::validate).
+    /// This is what `Deserialize` uses; see [`Validate`](super::Validate).
     pub fn new_lenient(value: impl Into<String>) -> Self {
         Self(value.into())
     }

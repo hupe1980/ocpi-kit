@@ -15,7 +15,7 @@
 //! 3. **Construct strictly.** `new` and `FromStr` refuse to build a non-conformant value, so
 //!    what this crate emits is conformant.
 //!
-//! See [`validate`] for why.
+//! See [`Validate`] for why.
 
 // The submodules are private and every public item is re-exported here, so each type has exactly
 // **one** path: `types::Number`, never also `types::number::Number`. Two paths to one item is two

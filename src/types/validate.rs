@@ -217,7 +217,27 @@ impl Validator {
 
 /// Checks an OCPI value against the constraints in the specification's property tables.
 ///
-/// See the [module documentation](self) for why this is not part of `Deserialize`.
+/// # Why validation is a separate pass
+///
+/// OCPI 2.3.0 requires that *"An OCPI Platform SHALL NOT reject request or response payloads based
+/// on the presence of JSON object field names that are not documented in this specification"*
+/// (§transport_and_format — Non-specified JSON fields). In the same spirit, and because a hub that
+/// drops a peer's data is worse than one that forwards slightly non-conformant data, `ocpi-kit`
+/// never fails a deserialisation because a `string(45)` field turned out to be 46 characters long.
+///
+/// Instead the crate follows one rule throughout:
+///
+/// > **Parse permissively, validate explicitly, construct strictly.**
+///
+/// * `Deserialize` accepts what the peer sent, as long as it is well-typed JSON.
+/// * [`Validate::validate`] reports *every* violation, each with a JSON Pointer
+///   ([RFC 6901](https://datatracker.ietf.org/doc/html/rfc6901)) into the object, so a conformance
+///   report can point at the exact field.
+/// * The constructors ([`CiString::new`](crate::types::CiString::new),
+///   [`OcpiString::new`](crate::types::OcpiString::new), …) refuse to build a value that is already
+///   out of spec, so data *this* crate emits is conformant by construction.
+///
+/// Spec: 2.3.0 §transport_and_format_json_http_implementation_guide
 pub trait Validate {
     /// Appends this value's violations to `v`, relative to `v`'s current position.
     fn validate_in(&self, v: &mut Validator);

@@ -156,7 +156,7 @@ pub fn header_u64(headers: &HeaderMap, name: &HeaderName) -> Option<u64> {
 /// Reads the `country_code`/`party_id` pair under `country_header` and `party_header`.
 ///
 /// Returns `None` unless both are present and well-formed, which is what an
-/// [Open Routing Request](super::routing) looks like on the `to` side.
+/// [Open Routing Request](super::RoutingScenario::OpenRoutingRequest) looks like on the `to` side.
 #[must_use]
 pub fn header_party(
     headers: &HeaderMap,

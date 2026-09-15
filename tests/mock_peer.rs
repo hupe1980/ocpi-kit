@@ -175,7 +175,9 @@ async fn the_token_is_sent_base64_encoded_by_default() {
 
     let c = client();
     let peer = locations_peer(&server);
-    let mut stream = c.peer(&peer, test_msp()).locations()
+    let mut stream = c
+        .peer(&peer, test_msp())
+        .locations()
         .list(PageQuery::new())
         .expect("the peer implements Locations/SENDER");
     assert!(stream.next().await.expect("the request succeeds").is_none());
@@ -200,7 +202,9 @@ async fn a_peer_that_wants_an_unencoded_token_is_accommodated_by_a_quirk() {
     let mut peer = locations_peer(&server);
     peer.set_quirks(quirks);
 
-    let mut stream = c.peer(&peer, test_msp()).locations()
+    let mut stream = c
+        .peer(&peer, test_msp())
+        .locations()
         .list(PageQuery::new())
         .expect("the peer implements Locations/SENDER");
     assert!(stream.next().await.expect("the request succeeds").is_none());
@@ -251,7 +255,9 @@ async fn a_crawl_follows_the_link_header_across_pages() {
 
     let c = client();
     let peer = locations_peer(&server);
-    let mut stream = c.peer(&peer, test_msp()).locations()
+    let mut stream = c
+        .peer(&peer, test_msp())
+        .locations()
         .list(PageQuery::new())
         .expect("the peer implements Locations/SENDER");
 
@@ -350,7 +356,9 @@ async fn a_shrinking_result_set_rewinds_by_one_object_and_yields_no_duplicates()
 
     let c = client();
     let peer = locations_peer(&server);
-    let mut stream = c.peer(&peer, test_msp()).locations()
+    let mut stream = c
+        .peer(&peer, test_msp())
+        .locations()
         .list(PageQuery::new())
         .expect("the peer implements Locations/SENDER");
 
@@ -383,7 +391,9 @@ async fn a_peer_that_never_stops_offering_a_next_page_is_cut_off() {
 
     let c = client();
     let peer = locations_peer(&server);
-    let mut stream = c.peer(&peer, test_msp()).locations()
+    let mut stream = c
+        .peer(&peer, test_msp())
+        .locations()
         .list(PageQuery::new())
         .expect("the peer implements Locations/SENDER");
 
@@ -420,7 +430,9 @@ async fn an_ocpi_error_in_a_200_body_is_surfaced_as_an_error() {
 
     let c = client();
     let peer = locations_peer(&server);
-    let mut stream = c.peer(&peer, test_msp()).locations()
+    let mut stream = c
+        .peer(&peer, test_msp())
+        .locations()
         .list(PageQuery::new())
         .expect("the peer implements Locations/SENDER");
 
@@ -447,7 +459,9 @@ async fn a_non_conformant_object_still_decodes_and_is_reported_by_validation() {
 
     let c = client();
     let peer = locations_peer(&server);
-    let mut stream = c.peer(&peer, test_msp()).locations()
+    let mut stream = c
+        .peer(&peer, test_msp())
+        .locations()
         .list(PageQuery::new())
         .expect("the peer implements Locations/SENDER");
 
@@ -481,7 +495,9 @@ async fn a_transient_failure_is_retried_for_a_get() {
 
     let c = client();
     let peer = locations_peer(&server);
-    let mut stream = c.peer(&peer, test_msp()).locations()
+    let mut stream = c
+        .peer(&peer, test_msp())
+        .locations()
         .list(PageQuery::new())
         .expect("the peer implements Locations/SENDER");
     assert!(stream.next().await.expect("the retry succeeds").is_none());
@@ -501,8 +517,7 @@ async fn a_write_is_never_retried() {
         .build();
 
     let location = sample::location("LOC1").expect("valid sample");
-    let result =
-        c.peer(&peer, test_msp()).locations_receiver().put_location(&test_cpo(), &location).await;
+    let result = c.peer(&peer, test_msp()).locations_receiver().put_location(&test_cpo(), &location).await;
     assert!(result.is_err(), "the 503 surfaces");
     // `expect(1)` on the mock asserts the single attempt when the server is dropped.
 }

@@ -32,7 +32,7 @@
 //!
 //! **Parsing and conformance are separate questions.** A peer that overruns a `string(45)`
 //! cannot make a whole page of Locations undecodable; the value arrives, and
-//! [`types::Validate::validate`] reports it with a JSON Pointer. See [`types::validate`].
+//! [`types::Validate::validate`] reports it with a JSON Pointer. See [`types::Validate`].
 //!
 //! **The peer's OCPI version is not your problem.** [`client`], [`server`] and [`hub`] speak the
 //! canonical [`v2_3_0`] model and translate at the wire, so a 2.2.1 peer — most of the market —

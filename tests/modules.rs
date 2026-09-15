@@ -505,7 +505,9 @@ async fn a_cpo_can_volunteer_a_changed_active_profile() {
     let server = start().await;
     let client = client();
     let peer = peer_at(&server.base);
-    client.peer(&peer, test_msp()).charging_profiles()
+    client
+        .peer(&peer, test_msp())
+        .charging_profiles()
         .push_active_charging_profile("SESSION-9", &sample_profile())
         .await
         .expect("the PUT on the Sender interface reaches the handler");
@@ -684,7 +686,9 @@ async fn client_info_is_about_a_party_the_caller_does_not_have_to_own() {
     let peer = peer_at(&server.base);
     let other = PartyRef::new("DE", "XYZ").expect("a valid party");
 
-    let info = client.peer(&peer, test_msp()).hub_client_info()
+    let info = client
+        .peer(&peer, test_msp())
+        .hub_client_info()
         .client_info(&other)
         .await
         .expect("a 404 here would make the module unusable for its actual purpose");
@@ -746,7 +750,9 @@ async fn a_missing_interface_is_reported_before_a_request_is_made() {
         .versions_url(server.base.join("versions"))
         .party(test_cpo())
         .build();
-    let error = client.peer(&bare, test_msp()).payments()
+    let error = client
+        .peer(&bare, test_msp())
+        .payments()
         .terminal("TERM-1")
         .await
         .expect_err("the peer does not implement Payments");

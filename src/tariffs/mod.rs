@@ -1555,8 +1555,7 @@ mod tests {
     /// check does, drops the VAT off every refund.
     #[test]
     fn a_credit_keeps_its_tax_instead_of_being_read_as_a_negative_rate() {
-        let t =
-            tariff(vec![element(vec![component(TariffDimensionType::Energy, "-0.25", Some("21"), 1)])]);
+        let t = tariff(vec![element(vec![component(TariffDimensionType::Energy, "-0.25", Some("21"), 1)])]);
         let session =
             PricedSession::new(dt("2024-01-15T10:00:00Z"), TimeZone::utc()).with_period(PricedPeriod {
                 energy_kwh: n("10"),
@@ -1573,12 +1572,7 @@ mod tests {
     /// A genuinely negative rate still is one, on either sign of base.
     #[test]
     fn a_negative_vat_percentage_is_still_refused() {
-        let t = tariff(vec![element(vec![component(
-            TariffDimensionType::Energy,
-            "1.00",
-            Some("-21"),
-            1,
-        )])]);
+        let t = tariff(vec![element(vec![component(TariffDimensionType::Energy, "1.00", Some("-21"), 1)])]);
         let session =
             PricedSession::new(dt("2024-01-15T10:00:00Z"), TimeZone::utc()).with_period(PricedPeriod {
                 energy_kwh: n("10"),

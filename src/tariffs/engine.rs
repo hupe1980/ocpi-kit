@@ -542,8 +542,7 @@ impl PricingEngine {
             match sole_vat_rate(tariff) {
                 Some(rate) if basis_of(tariff) == TaxBasis::Excluded => {
                     clamp_rate = Some(rate);
-                    self.policy
-                        .round_currency(total_excl + total_excl * rate / Number::from(100u32))
+                    self.policy.round_currency(total_excl + total_excl * rate / Number::from(100u32))
                 }
                 _ => {
                     note_once(
@@ -596,11 +595,8 @@ impl PricingEngine {
         // produce. The bound is what the Tariff publishes, so it governs both totals rather than
         // being discarded — which used to publish a total above the stated maximum.
         if total_excl.is_positive() && total_incl < total_excl {
-            let capped = tariff
-                .max_price
-                .as_ref()
-                .and_then(|p| p.after_taxes)
-                .is_some_and(|cap| cap <= total_incl);
+            let capped =
+                tariff.max_price.as_ref().and_then(|p| p.after_taxes).is_some_and(|cap| cap <= total_incl);
             if capped {
                 notes.push(PricingNote::new(
                     PricingNoteCode::ContradictoryPriceLimit,
@@ -782,12 +778,7 @@ struct Segment {
 /// answer is `None` and the engine says the tax is not derivable rather than picking one.
 fn sole_vat_rate(tariff: &Tariff) -> Option<Number> {
     let mut found: Option<Number> = None;
-    for rate in tariff
-        .elements
-        .iter()
-        .flat_map(|e| e.price_components.iter())
-        .filter_map(|c| c.vat)
-    {
+    for rate in tariff.elements.iter().flat_map(|e| e.price_components.iter()).filter_map(|c| c.vat) {
         match found {
             None => found = Some(rate),
             Some(first) if first == rate => {}

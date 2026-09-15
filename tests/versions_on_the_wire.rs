@@ -277,7 +277,9 @@ async fn a_push_to_a_2_2_1_peer_is_written_in_2_2_1() {
 
     let mut location = sample::location("LOC2").expect("valid sample");
     location.help_phone = Some("+3299999999".parse().expect("a valid phone"));
-    client.peer(&peer, test_msp()).locations_receiver()
+    client
+        .peer(&peer, test_msp())
+        .locations_receiver()
         // The URL's owner must be the authenticated peer's own party; a platform writing under
         // someone else's gets a 404, which is what the specification permits.
         .put_location(&test_msp(), &location)
@@ -301,7 +303,9 @@ async fn a_patch_that_both_versions_read_the_same_way_goes_through() {
         "name": "Gent Noord",
         "last_updated": "2024-01-15T10:00:00Z",
     }));
-    client.peer(&peer, test_msp()).locations_receiver()
+    client
+        .peer(&peer, test_msp())
+        .locations_receiver()
         .patch(&test_msp(), "LOC1", None, None, &patch)
         .await
         .expect("`name` means the same thing in both versions");
@@ -320,7 +324,9 @@ async fn a_patch_the_versions_disagree_about_is_refused_with_the_way_out() {
         "help_phone": "+3212345678",
         "last_updated": "2024-01-15T10:00:00Z",
     }));
-    let error = client.peer(&peer, test_msp()).locations_receiver()
+    let error = client
+        .peer(&peer, test_msp())
+        .locations_receiver()
         .patch(&test_msp(), "LOC1", None, None, &patch)
         .await
         .expect_err("this cannot be translated");

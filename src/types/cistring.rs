@@ -48,7 +48,7 @@ use super::validate::{Validate, Validator, ViolationCode};
 /// complaint to [`Validate::validate`]. That is what keeps a peer's over-long identifier from
 /// making a whole page of Locations undecodable, and it is why the
 /// [`client`](crate::client) validates outgoing objects before sending them. See
-/// [`types::validate`](super::validate) for the full reasoning.
+/// [`Validate`](super::Validate) for the full reasoning.
 ///
 /// ```
 /// # use ocpi_kit::types::{CiString, Validate};

@@ -31,9 +31,23 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@cargo-fuzz
+      # `taiki-e/install-action` does not ship a cargo-fuzz manifest. `@cargo-fuzz` resolved to a
+      # branch whose `tool` input was never substituted, so the step succeeded and installed
+      # nothing — and the job then failed with "no such command: fuzz". Installed properly here;
+      # `Swatinem/rust-cache` caches `~/.cargo/bin`, so this compiles once per cache generation.
+      - name: install cargo-fuzz
+        run: command -v cargo-fuzz >/dev/null || cargo install cargo-fuzz --locked
       - name: seed the corpus from the specification's examples
         run: cargo run -p xtask -- fuzz-corpus
+      # A coverage-guided fuzzer that starts from its seeds every night re-finds the same shallow
+      # inputs every night. The corpus is restored from the previous run and saved after it, so
+      # each night starts where the last one stopped.
+      - name: restore the corpus
+        uses: actions/cache@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
       - name: fuzz
         working-directory: fuzz
         run: |

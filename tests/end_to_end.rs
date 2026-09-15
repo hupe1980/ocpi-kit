@@ -300,7 +300,9 @@ async fn a_paginated_pull_crawls_every_page() {
     let client = client();
     let peer = peer_at(&server.base, test_token("c"));
 
-    let mut stream = client.peer(&peer, test_msp()).locations()
+    let mut stream = client
+        .peer(&peer, test_msp())
+        .locations()
         .list(PageQuery::new())
         .expect("the peer implements the Sender interface");
 
@@ -328,7 +330,9 @@ async fn a_date_window_narrows_the_pull_and_the_total_count() {
     let from = all[3].last_updated;
     let to = all[7].last_updated;
 
-    let objects = client.peer(&peer, test_msp()).locations()
+    let objects = client
+        .peer(&peer, test_msp())
+        .locations()
         .list(PageQuery::between(from, to))
         .expect("mounted")
         .collect_all()
@@ -500,7 +504,9 @@ async fn a_bootstrap_token_cannot_reach_a_functional_module() {
     // `test_token("a")` is registered as CREDENTIALS_TOKEN_A.
     let peer = peer_at(&server.base, test_token("a"));
 
-    let error = client.peer(&peer, test_msp()).locations()
+    let error = client
+        .peer(&peer, test_msp())
+        .locations()
         .location("LOC0")
         .await
         .expect_err("TOKEN_A is scoped to credentials and versions");
@@ -519,8 +525,7 @@ async fn an_unknown_token_is_a_401() {
     let client = client();
     let peer = peer_at(&server.base, CredentialsToken::new("not-a-registered-token").unwrap());
 
-    let error =
-        client.peer(&peer, test_msp()).locations().location("LOC0").await.expect_err("unknown token");
+    let error = client.peer(&peer, test_msp()).locations().location("LOC0").await.expect_err("unknown token");
     assert_eq!(error.http_status(), 401);
 }
 
