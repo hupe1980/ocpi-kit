@@ -16,11 +16,11 @@ use crate::{Failure, RELEASES};
 /// Fails when the vendored specification cannot be read or the fixture directory cannot be
 /// written.
 pub fn sync(root: &Path) -> Result<bool, Failure> {
-    let specs = root.join("specs/src");
+    let specs = crate::spec_dir(root);
     if !specs.is_dir() {
         return Err(format!(
-            "{} does not exist; the vendored specification is git-ignored, so clone \
-             github.com/ocpi/ocpi into specs/src/ocpi-<version> first",
+            "{} does not exist; the specification is git-ignored, so run \
+             `cargo run -p xtask -- spec-sync --fetch` first (or set OCPI_REFERENCE)",
             specs.display()
         )
         .into());

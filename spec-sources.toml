@@ -1,13 +1,15 @@
 # The OCPI specification releases this crate is written against.
 #
-# The specification itself is **not** vendored: OCPI is published under CC BY-ND 4.0, so
-# `specs/src/` is a local checkout and is git-ignored. What is committed is this manifest — which
+# The specification itself is **not** vendored: OCPI is published under CC BY-ND 4.0, so the
+# checkout is local and git-ignored (`$OCPI_REFERENCE/src/` when set, else a directory under the
+# repository's ignored internal notes). What is committed is this manifest — which
 # release, which branch, which commit — and `spec-sources.lock`, a SHA-256 of every file the
 # censuses read.
 #
 #   cargo run -p xtask -- spec-sync --fetch    # materialise exactly these commits
 #   cargo run -p xtask -- spec-sync --check    # is the checkout the one we were written against?
 #   cargo run -p xtask -- spec-sync --latest   # has upstream edited the branch since?
+#   cargo run -p xtask -- errata --upstream    # …and has it fixed an erratum we record?
 #
 # Why a pin at all: the OCPI repository edits released branches **in place**. In July 2026 it
 # restructured 2.3.0 — moving the Payments module and `Tariff.preauthorize_amount` out of core
@@ -22,13 +24,16 @@ label = "OCPI 2.3.0 core"
 repo = "https://github.com/ocpi/ocpi.git"
 branch = "2.3.0/release/core"
 commit = "3979887793d934cdc64e2ca2c78b89cbbf79d56f"
+# Unmerged editorial fixes to core. `errata --upstream` evaluates every erratum here too, so a fix
+# that lands on this branch arrives as news before it is ever merged.
+watch = ["2.3.0/hotfix/core-editorial"]
 
 [[release]]
 name = "ocpi-2.3.0-payments"
 label = "OCPI 2.3.0 payments release branch"
 repo = "https://github.com/ocpi/ocpi.git"
 branch = "2.3.0/release/payments"
-commit = "774e23a925c158481cd8cc9f8fc6824c1b11eaae"
+commit = "5a961c25a99d90695a9927ad35aba72beab06561"
 
 [[release]]
 name = "ocpi-2.3.0-bookings"

@@ -38,10 +38,13 @@
 //!
 //! # What this client does that a hand-rolled one usually does not
 //!
-//! * **It refuses to call a URL it should not.** Every request is checked against a
-//!   [`UrlPolicy`] that says no to plain HTTP, loopback and private
-//!   addresses by default. `Credentials.url`, `Endpoint.url` and every `response_url` are
-//!   attacker-influenced inputs; a client that fetches them unconditionally is an SSRF proxy.
+//! * **It refuses to connect where it should not.** `Credentials.url`, `Endpoint.url`, every
+//!   `next` link and every `response_url` are chosen by the counterparty; a client that fetches
+//!   them unconditionally is an SSRF proxy. A [`UrlPolicy`] (HTTPS only, no private networks by
+//!   default) is enforced three times: on the URL, on every redirect hop — a `GET` may follow
+//!   at most five redirects within its own origin, a write none — and on the address actually
+//!   connected to, so a host name that resolves to a private address, or that changes its answer
+//!   between a check and a connection, is refused too. See [`ClientConfig::http_builder`].
 //! * **It validates what it sends.** [`ClientConfig::validate_outgoing`] is on by default, so a
 //!   non-conformant object is caught here rather than at the partner's support desk.
 //! * **It only retries what it may.** *"OCPI messages SHOULD NOT be queued. When a client does a
@@ -52,6 +55,7 @@
 //!   itself in any case.
 
 mod conformance;
+mod egress;
 mod http;
 mod modules;
 mod paging;
@@ -60,6 +64,7 @@ mod registration;
 mod resync;
 
 pub use conformance::{Check, Conformance, Outcome, Report};
+pub use egress::{GuardedResolver, MAX_REDIRECTS};
 pub use http::{OcpiRequest, Transport, check_outgoing};
 #[cfg(feature = "payments")]
 #[cfg_attr(docsrs, doc(cfg(feature = "payments")))]
@@ -128,6 +133,34 @@ impl ClientConfig {
         self
     }
 
+    /// The HTTP client this configuration needs, ready to customise and build.
+    ///
+    /// Carries the user agent, **no automatic redirects** (the client follows them itself,
+    /// checking each hop) and a [`GuardedResolver`] that refuses every resolved address
+    /// [`url_policy`](Self::url_policy) does not permit, at connect time. Start here when you
+    /// need a proxy, custom TLS roots or a shared pool, and hand the result to
+    /// [`OcpiClient::from_http`]:
+    ///
+    /// ```no_run
+    /// use ocpi_kit::client::{ClientConfig, OcpiClient};
+    ///
+    /// # fn main() -> Result<(), reqwest::Error> {
+    /// let config = ClientConfig::default();
+    /// let http = config.http_builder().pool_max_idle_per_host(32).build()?;
+    /// let client = OcpiClient::from_http(http, config);
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// Behind an HTTP proxy the resolver sees the proxy rather than the target, so egress rules
+    /// for the target are the proxy's to enforce. `ClientBuilder::resolve` overrides bypass the
+    /// resolver for the names they pin; that is what they are for.
+    pub fn http_builder(&self) -> reqwest::ClientBuilder {
+        reqwest::Client::builder()
+            .user_agent(concat!("ocpi-kit/", env!("CARGO_PKG_VERSION")))
+            .redirect(reqwest::redirect::Policy::none())
+            .dns_resolver(GuardedResolver::new(self.url_policy.clone()))
+    }
+
     /// Turns off validation of outgoing objects.
     ///
     /// Only reasonable when a peer is known to require something non-conformant, and then it is
@@ -194,12 +227,16 @@ impl OcpiClient {
     ///
     /// As [`OcpiClient::new`].
     pub fn with_config(config: ClientConfig) -> Result<Self, reqwest::Error> {
-        let http =
-            reqwest::Client::builder().user_agent(concat!("ocpi-kit/", env!("CARGO_PKG_VERSION"))).build()?;
+        let http = config.http_builder().build()?;
         Ok(Self { transport: Transport::new(http, config) })
     }
 
-    /// A client over an existing `reqwest` client, for sharing a connection pool.
+    /// A client over an existing `reqwest` client, for sharing a connection pool or using a proxy.
+    ///
+    /// Build `http` from [`ClientConfig::http_builder`]. A client built any other way keeps the
+    /// URL check but loses the connect-time address check; and if it follows redirects itself
+    /// (`reqwest`'s default), every response it reached by one is refused as
+    /// [`UrlRefused`](crate::transport::OcpiError::UrlRefused) — after the request was sent.
     #[must_use]
     pub fn from_http(http: reqwest::Client, config: ClientConfig) -> Self {
         Self { transport: Transport::new(http, config) }

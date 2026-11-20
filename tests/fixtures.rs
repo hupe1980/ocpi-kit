@@ -231,24 +231,6 @@ impl Validate for EnergyMixExample {
     }
 }
 
-/// `payment_terminal_create_minimal.json` is a Terminal creation body: `terminal_id` only, with
-/// no `last_updated` — which the Terminal object requires, because the server assigns it.
-///
-/// The example belongs to the `payments` release branch, so the type it is read into is gated the
-/// same way its corpus is.
-#[cfg(feature = "payments")]
-#[derive(serde::Serialize, serde::Deserialize)]
-struct TerminalMinimal {
-    terminal_id: ocpi_kit::types::CiString<36>,
-}
-
-#[cfg(feature = "payments")]
-impl Validate for TerminalMinimal {
-    fn validate_in(&self, v: &mut ocpi_kit::types::Validator) {
-        v.field("terminal_id", &self.terminal_id);
-    }
-}
-
 /// Normalises a JSON document so that only meaningful differences remain: numbers become their
 /// decimal text, and object keys are ordered (which `serde_json::Map` already does).
 fn canonical(value: &serde_json::Value) -> serde_json::Value {
@@ -589,26 +571,28 @@ fn expectations_payments() -> BTreeMap<&'static str, Expect> {
         "payment_terminal_example_assigned_locations.json",
         "payment_terminal_example_assigned_locations_assigned_evses.json",
         "payment_terminal_example_newly_created.json",
+        // `terminal_id` and `last_updated`, the two required fields — since the payments branch's
+        // 2026 correction, which added the `last_updated` it used to omit.
+        "payment_terminal_create_minimal.json",
     ] {
         m.insert(f, Expect::Ok(roundtrip!(Terminal)));
     }
-    m.insert("payment_terminal_create_minimal.json", Expect::Ok(roundtrip!(TerminalMinimal)));
     // A PUT body whose `terminal_id` is carried by the URL rather than the body.
     m.insert("payment_terminal_put_update.json", Expect::Ok(roundtrip!(serde_json::Value)));
+    // Rewritten into the 2.3.0 `Price` shape by the payments branch's 2026 correction.
     for f in [
         "payment_financial_advice_confirmation_create.json",
-        "payment_financial_advice_confirmation_example_failure.json",
         "payment_financial_advice_confirmation_example_success.json",
     ] {
-        m.insert(
-            f,
-            Expect::Erratum(
-                roundtrip!(FinancialAdviceConfirmation),
-                "`total_costs` is written in the OCPI 2.2.1 Price shape `{excl_vat, incl_vat}`; \
-                 OCPI 2.3.0 replaced it with `{before_taxes, taxes[]}`",
-            ),
-        );
+        m.insert(f, Expect::Ok(roundtrip!(FinancialAdviceConfirmation)));
     }
+    m.insert(
+        "payment_financial_advice_confirmation_example_failure.json",
+        Expect::Erratum(
+            roundtrip!(FinancialAdviceConfirmation),
+            "omits `eft_data`, which the object's own table makes required (`+`: one or more)",
+        ),
+    );
     m
 }
 

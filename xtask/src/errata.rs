@@ -36,7 +36,7 @@ struct Erratum {
     id: &'static str,
     /// What is wrong, in one line.
     title: &'static str,
-    /// Directory under `specs/src/`.
+    /// Directory under the spec checkout ([`crate::spec_dir`]).
     release: &'static str,
     /// File within that release.
     file: &'static str,
@@ -46,6 +46,78 @@ struct Erratum {
     absent: &'static [&'static str],
     /// What it means for this crate — printed when the erratum stops reproducing.
     consequence: &'static str,
+    /// Where the erratum stands. `concepts/ERRATA.md` mirrors this; CI cannot read that file,
+    /// so the state the checks hold the specification to lives here.
+    state: State,
+}
+
+/// The lifecycle of an erratum.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum State {
+    /// Present at the pin and, as far as anyone has checked, everywhere upstream.
+    Open,
+    /// Corrected on an upstream branch the pin has not moved to. Still present at the pin, so the
+    /// crate's workaround still stands; `--upstream` holds the branch to having fixed it.
+    FixedUpstream { branch: &'static str, commit: &'static str },
+    /// The pin has moved past the fix. The defect must stay absent at the pin; the entry is kept
+    /// for the reader who meets a peer built against the old text.
+    Adopted,
+}
+
+impl State {
+    fn label(self) -> String {
+        match self {
+            Self::Open => "open".to_owned(),
+            Self::FixedUpstream { branch, commit } => format!("fixed upstream on {branch} @ {commit}"),
+            Self::Adopted => "adopted".to_owned(),
+        }
+    }
+}
+
+/// Why `text` does not show the erratum; empty when the erratum is there.
+fn evaluate(erratum: &Erratum, text: &str) -> Result<Vec<String>, Failure> {
+    let mut reasons = Vec::new();
+    for pattern in erratum.present {
+        if !Regex::new(pattern)?.is_match(text) {
+            reasons.push(format!("expected to find {pattern:?}"));
+        }
+    }
+    for pattern in erratum.absent {
+        if Regex::new(pattern)?.is_match(text) {
+            reasons.push(format!("expected {pattern:?} to be absent, and it is there"));
+        }
+    }
+    Ok(reasons)
+}
+
+/// What one upstream ref says about one erratum, compared with what the crate records.
+///
+/// `is_head` is true for the release's own branch, false for a watched one. Returns the finding
+/// to report when the two disagree.
+fn upstream_finding(
+    erratum: &Erratum,
+    branch: &str,
+    commit: &str,
+    is_head: bool,
+    present: bool,
+) -> Option<String> {
+    let at = format!("{branch} @ {}", crate::spec_sync::short(commit));
+    match erratum.state {
+        State::Adopted => None,
+        State::Open if !present => Some(format!(
+            "{} is fixed on {at} but recorded as open: record it as fixed upstream, and re-read what \
+             this crate does about it ({})",
+            erratum.id, erratum.consequence
+        )),
+        State::FixedUpstream { branch: fixed_on, .. } if branch == fixed_on && present => {
+            Some(format!("{} is recorded as fixed on {fixed_on}, but {at} has it again", erratum.id))
+        }
+        State::FixedUpstream { .. } if is_head && !present => Some(format!(
+            "{} is fixed on the pinned branch's head {at}: move the pin and adopt it",
+            erratum.id
+        )),
+        _ => None,
+    }
 }
 
 /// Every erratum this crate is shaped around.
@@ -59,16 +131,19 @@ const ERRATA: &[Erratum] = &[
         absent: &[],
         consequence: "the URL builders read it as {hubclientinfo_endpoint_url}; if the copy-paste \
                       is fixed, delete the note",
+        state: State::Open,
     },
     Erratum {
         id: "E02",
-        title: "the Hub Client Info receiver example uses version 2.0 and the path `clientinfo`",
+        title: "the Hub Client Info receiver example uses the path `clientinfo` (and, at the pin, version 2.0)",
         release: "ocpi-2.3.0",
         file: "mod_hub_client_info.asciidoc",
-        present: &[r"/2\.0/clientinfo"],
+        // The hotfix corrects the version and keeps the path, so only the path is held here.
+        present: &[r"/\d\.\d(?:\.\d)?/clientinfo"],
         absent: &[],
         consequence: "the builders use the discovered endpoint URL and treat the example as \
                       non-normative",
+        state: State::Open,
     },
     Erratum {
         id: "E03",
@@ -79,6 +154,7 @@ const ERRATA: &[Erratum] = &[
         absent: &[],
         consequence: "`ModuleId::Booking` matches `bookings` case-insensitively as an interop \
                       accommodation; if the identifier is regularised, drop the accommodation",
+        state: State::Open,
     },
     Erratum {
         id: "E04",
@@ -88,6 +164,7 @@ const ERRATA: &[Erratum] = &[
         present: &[r"ModuleID _OpenEnum_"],
         absent: &[r"\|<<mod_payments"],
         consequence: "`ModuleId::Payments` exists and documents the omission",
+        state: State::Adopted,
     },
     Erratum {
         id: "E05",
@@ -97,6 +174,7 @@ const ERRATA: &[Erratum] = &[
         present: &[r"ModuleID _OpenEnum_"],
         absent: &[r"\|<<mod_bookings"],
         consequence: "`ModuleId::Booking` exists and documents the omission",
+        state: State::Open,
     },
     Erratum {
         id: "E06",
@@ -107,6 +185,7 @@ const ERRATA: &[Erratum] = &[
         present: &[r"ModuleID _OpenEnum_"],
         absent: &[r"\|<<mod_invoice_reconciliation"],
         consequence: "`ModuleId::InvoiceReconciliation` exists and documents the omission",
+        state: State::FixedUpstream { branch: "2.3.0/hotfix/core-editorial", commit: "ac7b49043d" },
     },
     Erratum {
         id: "E07",
@@ -122,6 +201,7 @@ const ERRATA: &[Erratum] = &[
         absent: &[],
         consequence: "`SenderEndpoint::payments_terminals` derives both from the one discovered \
                       endpoint, and tolerates a peer that advertised a sub-path directly",
+        state: State::Adopted,
     },
     Erratum {
         id: "E08",
@@ -132,6 +212,7 @@ const ERRATA: &[Erratum] = &[
         absent: &[],
         consequence: "the body is typed `Patch<Terminal>` — an object with fields left out — and \
                       is deliberately not treated as a merge patch",
+        state: State::Adopted,
     },
     Erratum {
         id: "E09",
@@ -142,6 +223,7 @@ const ERRATA: &[Erratum] = &[
         absent: &[],
         consequence: "the Sender's freedom over the `response_url` is what distinguishes them: \
                       `OcpiRouter` mounts one path per result kind",
+        state: State::Open,
     },
     Erratum {
         id: "E10",
@@ -152,6 +234,7 @@ const ERRATA: &[Erratum] = &[
         absent: &[],
         consequence: "rounding is a `PricingPolicy` setting with a recorded default, not an \
                       assumption in the code",
+        state: State::Open,
     },
     Erratum {
         id: "E11",
@@ -163,6 +246,7 @@ const ERRATA: &[Erratum] = &[
         absent: &[],
         consequence: "0 is read as no quantisation at all, while 1 is applied; `ocpi lint` reports \
                       a zero step on a dimension that has a unit",
+        state: State::Open,
     },
     Erratum {
         id: "E12",
@@ -174,6 +258,7 @@ const ERRATA: &[Erratum] = &[
         absent: &[],
         consequence: "a period that outlasts its Price Component is priced at the rate that \
                       applied when it began, with a `PeriodSpansPriceChange` note",
+        state: State::Open,
     },
     Erratum {
         id: "E13",
@@ -188,6 +273,7 @@ const ERRATA: &[Erratum] = &[
         absent: &[],
         consequence: "the sentence governs: PARKING_TIME absorbs the rounding whenever the session \
                       has any, and `ocpi lint` reports a TIME `step_size` that can never apply",
+        state: State::Open,
     },
     Erratum {
         id: "E14",
@@ -200,6 +286,7 @@ const ERRATA: &[Erratum] = &[
         consequence: "modelled as the string(512) the text says, case-sensitive, following the \
                       text over the cross-reference — a Url would reject a conformant 300-\
                       character link",
+        state: State::Open,
     },
     Erratum {
         id: "E15",
@@ -211,6 +298,7 @@ const ERRATA: &[Erratum] = &[
         absent: &[],
         consequence: "`Validate` does not report it; `Token::follows_whitelist_recommendation` \
                       answers the question for a caller who wants to ask it",
+        state: State::Open,
     },
     Erratum {
         id: "E16",
@@ -222,6 +310,7 @@ const ERRATA: &[Erratum] = &[
         absent: &[],
         consequence: "2.1.1 gets its own EnvironmentalImpact type; reusing the later one would \
                       drop a 2.1.1 peer's value into `extensions`",
+        state: State::Open,
     },
     Erratum {
         id: "E17",
@@ -232,6 +321,7 @@ const ERRATA: &[Erratum] = &[
         present: &[r"Choice: one of two"],
         absent: &[],
         consequence: "2.1.1 gets its own `Hours` with `twentyfourseven: Option<bool>`",
+        state: State::Open,
     },
     Erratum {
         id: "E18",
@@ -242,6 +332,7 @@ const ERRATA: &[Erratum] = &[
         absent: &[],
         consequence: "the field is behind the `payments` feature and declared branch-only in the \
                       census; it was part of core until upstream moved the module out in July 2026",
+        state: State::Open,
     },
     Erratum {
         id: "E19",
@@ -253,6 +344,43 @@ const ERRATA: &[Erratum] = &[
         absent: &[],
         consequence: "`ocpi lint` reports it as `unused_time_step_size`; it is the shape on which \
                       two readings of the step_size sentence disagree about a real session",
+        state: State::Open,
+    },
+    Erratum {
+        id: "E20",
+        title: "the Complex Tariff example prices 114 minutes at € 1.25/h as € 2.28 (that is € 1.20/h)",
+        release: "ocpi-2.3.0",
+        file: "mod_tariffs.asciidoc",
+        present: &[
+            r"\| Charging time \| 114 minutes \| 1\.25 per hour \| 2\.28",
+            r"\| Total \| \| \| 12\.28",
+        ],
+        absent: &[],
+        consequence: "the engine follows the rules, not the arithmetic: the worked-example test asserts \
+                      € 12.375 / € 13.975 (€ 12.38 / € 13.98 at currency precision)",
+        state: State::FixedUpstream { branch: "2.3.0/hotfix/core-editorial", commit: "ac7b49043d" },
+    },
+    Erratum {
+        id: "E21",
+        title: "both `Authorization: Token` examples base64-encode a trailing newline",
+        release: "ocpi-2.3.0",
+        file: "transport_and_format.asciidoc",
+        present: &[r"Authorization: Token \S*Cg==", r"Authorization: Token ZXhhbXBsZS10b2tlbgo="],
+        absent: &[],
+        consequence: "not accommodated: a token is what it is. The likeliest cause of a first \
+                      registration failing against a peer that copied the example",
+        state: State::FixedUpstream { branch: "2.3.0/hotfix/core-editorial", commit: "ac7b49043d" },
+    },
+    Erratum {
+        id: "E22",
+        title: "the CDR example's coordinates are transposed (latitude 3.73, longitude 51.05 for Ghent)",
+        release: "ocpi-2.3.0",
+        file: "examples/cdr_example.json",
+        present: &[r#""latitude": "3\.729944""#],
+        absent: &[],
+        consequence: "the fixture decodes (both values are in range) and nothing structural can catch it; \
+                      recorded so nobody copies the example",
+        state: State::FixedUpstream { branch: "2.3.0/hotfix/core-editorial", commit: "ac7b49043d" },
     },
 ];
 
@@ -262,8 +390,8 @@ const ERRATA: &[Erratum] = &[
 ///
 /// Fails when the specification is not vendored, when a file an erratum names cannot be read, or
 /// when a pattern does not compile.
-pub fn report(root: &Path, check: bool) -> Result<bool, Failure> {
-    let specs = root.join("specs/src");
+pub fn report(root: &Path, check: bool, upstream: bool) -> Result<bool, Failure> {
+    let specs = crate::spec_dir(root);
     if !specs.is_dir() {
         return Err(format!(
             "{} does not exist; run `cargo run -p xtask -- spec-sync --fetch` first",
@@ -284,23 +412,30 @@ pub fn report(root: &Path, check: bool) -> Result<bool, Failure> {
             continue;
         };
 
-        let mut reasons = Vec::new();
-        for pattern in erratum.present {
-            let re = Regex::new(pattern)?;
-            if !re.is_match(&text) {
-                reasons.push(format!("expected to find {pattern:?}"));
-            }
-        }
-        for pattern in erratum.absent {
-            let re = Regex::new(pattern)?;
-            if re.is_match(&text) {
-                reasons.push(format!("expected {pattern:?} to be absent, and it is there"));
-            }
-        }
+        let reasons = evaluate(erratum, &text)?;
 
+        if erratum.state == State::Adopted {
+            if reasons.is_empty() {
+                stale.push(format!(
+                    "{} {}\n     in {}/{}\n     recorded as adopted, and the defect is back at the pin",
+                    erratum.id, erratum.title, erratum.release, erratum.file
+                ));
+            } else {
+                standing += 1;
+                println!("[ok] {} {} — adopted, and still fixed at the pin", erratum.id, erratum.title);
+            }
+            continue;
+        }
         if reasons.is_empty() {
             standing += 1;
-            println!("[ok] {} {} — still in {}/{}", erratum.id, erratum.title, erratum.release, erratum.file);
+            println!(
+                "[ok] {} {} — still in {}/{} ({})",
+                erratum.id,
+                erratum.title,
+                erratum.release,
+                erratum.file,
+                erratum.state.label()
+            );
         } else {
             stale.push(format!(
                 "{} {}\n     in {}/{}\n     {}\n     what this crate does about it: {}",
@@ -314,9 +449,22 @@ pub fn report(root: &Path, check: bool) -> Result<bool, Failure> {
         }
     }
 
-    if stale.is_empty() {
-        println!("\n{standing} erratum/errata re-derived from the specification; every one is still real");
+    let news = if upstream { upstream_news(root)? } else { Vec::new() };
+
+    if stale.is_empty() && news.is_empty() {
+        println!(
+            "\n{standing} erratum/errata re-derived from the specification; every one is where it is recorded"
+        );
         return Ok(true);
+    }
+    if !news.is_empty() {
+        println!("\n{} upstream change(s) the errata table does not record yet:\n", news.len());
+        for entry in &news {
+            println!("  {entry}");
+        }
+    }
+    if stale.is_empty() {
+        return Ok(!check);
     }
 
     println!("\n{} erratum/errata no longer reproduce:\n", stale.len());
@@ -329,6 +477,45 @@ pub fn report(root: &Path, check: bool) -> Result<bool, Failure> {
          merely moved."
     );
     Ok(!check)
+}
+
+/// Evaluates every erratum that is not adopted at its release's branch head and at every branch
+/// the manifest watches for that release, and returns where that disagrees with the recorded state.
+fn upstream_news(root: &Path) -> Result<Vec<String>, Failure> {
+    use crate::spec_sync::{capture, git, read_manifest, short};
+
+    let mut news = Vec::new();
+    for release in read_manifest(&root.join("spec-sources.toml"))? {
+        let dir = crate::spec_dir(root).join(&release.name);
+        if !dir.join(".git").is_dir() {
+            return Err(format!("{}: not a git checkout; run spec-sync --fetch first", release.name).into());
+        }
+        let errata: Vec<&Erratum> =
+            ERRATA.iter().filter(|e| e.release == release.name && e.state != State::Adopted).collect();
+        let refs = std::iter::once((release.branch.as_str(), true))
+            .chain(release.watch.iter().map(|w| (w.as_str(), false)));
+        for (branch, is_head) in refs {
+            if git(&dir, &["fetch", "--quiet", "origin", branch]).is_err() {
+                news.push(format!(
+                    "{}: could not fetch {branch} (deleted or merged upstream?)",
+                    release.name
+                ));
+                continue;
+            }
+            let commit = capture(&dir, &["rev-parse", "FETCH_HEAD"])?.trim().to_owned();
+            println!("[upstream] {} — {branch} @ {}", release.name, short(&commit));
+            for erratum in &errata {
+                // A file that does not exist on the branch cannot show the erratum.
+                let text =
+                    capture(&dir, &["show", &format!("{commit}:{}", erratum.file)]).unwrap_or_default();
+                let present = evaluate(erratum, &text)?.is_empty();
+                if let Some(finding) = upstream_finding(erratum, branch, &commit, is_head, present) {
+                    news.push(finding);
+                }
+            }
+        }
+    }
+    Ok(news)
 }
 
 #[cfg(test)]
@@ -352,5 +539,49 @@ mod tests {
             assert!(!ids.contains(&erratum.id), "{} is used twice", erratum.id);
             ids.push(erratum.id);
         }
+    }
+
+    fn erratum(state: State) -> Erratum {
+        Erratum {
+            id: "E99",
+            title: "t",
+            release: "ocpi-2.3.0",
+            file: "f",
+            present: &["defect"],
+            absent: &[],
+            consequence: "c",
+            state,
+        }
+    }
+
+    const HOTFIX: State = State::FixedUpstream { branch: "hotfix", commit: "abc" };
+
+    #[test]
+    fn evaluation_finds_the_defect_or_names_why_not() {
+        let e = erratum(State::Open);
+        assert!(evaluate(&e, "a defect here").unwrap().is_empty());
+        assert_eq!(evaluate(&e, "fixed").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn an_open_erratum_fixed_anywhere_upstream_is_news_with_a_name() {
+        let news = upstream_finding(&erratum(State::Open), "hotfix", "abcdef1234567", false, false).unwrap();
+        assert!(news.contains("E99") && news.contains("hotfix @ abcdef1234"), "{news}");
+        assert_eq!(upstream_finding(&erratum(State::Open), "main", "abc", true, true), None);
+    }
+
+    #[test]
+    fn a_recorded_upstream_fix_is_held_to_its_branch() {
+        assert_eq!(upstream_finding(&erratum(HOTFIX), "hotfix", "abc", false, false), None, "as recorded");
+        let back = upstream_finding(&erratum(HOTFIX), "hotfix", "abc", false, true).unwrap();
+        assert!(back.contains("has it again"), "{back}");
+        let merged = upstream_finding(&erratum(HOTFIX), "main", "abc", true, false).unwrap();
+        assert!(merged.contains("move the pin"), "{merged}");
+        assert_eq!(upstream_finding(&erratum(HOTFIX), "main", "abc", true, true), None, "not merged yet");
+    }
+
+    #[test]
+    fn an_adopted_erratum_is_not_evaluated_upstream() {
+        assert_eq!(upstream_finding(&erratum(State::Adopted), "main", "abc", true, true), None);
     }
 }

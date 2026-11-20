@@ -30,9 +30,30 @@ target
 /fuzz/artifacts/
 /fuzz/coverage/
 
-# Internal-only material (not part of the published crate)
-/specs/
 .DS_Store
 
-# Internal architecture notes (not part of the published crate)
+# ── Internal notes, feature specifications and third-party sources ─────────────
+
+# Architecture notes (not published): the D/R-numbered decisions and risks, the
+# errata, and ROADMAP.md, the spec of specs — every open item names its feature
+# specification.
+#
+# The OCPI specification corpus — the pinned checkouts of github.com/ocpi/ocpi
+# that `cargo run -p xtask -- spec-sync --fetch` materialises, and the release
+# PDFs — lives at `concepts/reference/` and is covered by this line: CC BY-ND 4.0
+# and not redistributed. What is committed is spec-sources.toml and its lock.
+# `$OCPI_REFERENCE` points the xtask elsewhere.
 /concepts/
+
+# This project's own feature specifications, and the Spec Kit machinery that
+# produces them: one `specs/NNN-slug/` per ROADMAP item (spec, plan, research,
+# tasks, threat model), `.specify/memory/constitution.md`, and the `/speckit-*`
+# skills. Same rule as `concepts/` — internal, and the published tree may not
+# cite a path its reader does not have; `scripts/concepts-check.sh` fails on one
+# that does.
+#
+# Until 2026-11-20 `specs/` held the OCPI corpus now under `concepts/reference/`;
+# a stale copy is ignored by the same line. Matches ocpp-kit, eebus and metering.
+/specs/
+/.specify/
+/.claude/

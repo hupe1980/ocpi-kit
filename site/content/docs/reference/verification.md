@@ -284,7 +284,8 @@ element.
 
 ## Everything else
 
-584 tests across twelve targets, under three feature sets on three platforms.
+Every test target runs under three feature sets on three platforms, and once more with the exact
+JSON boundary (`exact-json`).
 
 * Clippy at `pedantic` with `-D warnings`, under three feature sets.
 * Every feature, and every pair of layer features, compiled — this is what catches a layer using a

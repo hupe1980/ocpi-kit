@@ -4,7 +4,79 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.4.0] — unreleased
+## [0.5.0] — 2026-11-20
+
+An SSRF hole in the client's redirect handling, numbers that stopped decoding when another crate
+enabled `serde_json/arbitrary_precision`, and the payments branch re-pinned to its corrected text.
+
+### Security
+
+- **The URL policy now holds on every redirect hop and on every connection.** The client used
+  to check a peer's URL once and then let `reqwest` follow up to ten redirects anywhere — one
+  `302` to `http://169.254.169.254/` from any registered peer reached the cloud metadata service.
+  Redirects are now followed by the client itself: `GET` only, within the requested origin (or an
+  `http` → `https` upgrade of it), each target re-checked, at most five. A write is never
+  redirected. A resolver in the connection path refuses every address the policy does not
+  permit, so a host name with a private record, or one that rebinds between a check and the
+  connection, is refused too. Every refusal is `OcpiError::UrlRefused` naming the target
+  (without its query) and the rule.
+- **"Private network" follows the IANA special-purpose registries.** `0.0.0.0/8`, `192.0.0.0/24`,
+  `198.18.0.0/15`, multicast, reserved space, IPv6 documentation, discard-only and SRv6 ranges,
+  local-use NAT64, 6to4 and Teredo were missing. `UrlPolicy::permits_address` exposes the rule.
+- Dependencies updated past RUSTSEC-2026-0346/0347 (rustls), -0382 (rustls-webpki), -0383
+  (webpki-root-certs) and -0386 (tokio).
+
+### Fixed
+
+- **Numbers decode under `serde_json/arbitrary_precision`.** With that feature enabled anywhere in
+  a build — Cargo unifies features — every fractional OCPI number failed with *"invalid type:
+  map, expected a JSON number"*, stopping CDR, tariff and session intake. `Number` now reads
+  serde_json's exact form, and only when that mode is really on. Decoding normalises (`5.00` is
+  `5`) in both modes; exponent literals are exact; a literal with more than 28 significant digits
+  rounds instead of failing, and an out-of-range one is refused without panicking.
+- `cargo test --features tariffs` compiles: the CDR-verifier tests no longer need `testkit`.
+
+### Added
+
+- **Feature `exact-json`:** the JSON boundary itself becomes exact — every number read from its
+  literal and written as one, 28 significant digits, no float in either direction.
+  `Number::exact_json_active()` reports the mode in effect, and `Imprecise` is reported only when
+  rounding really happens.
+- `ClientConfig::http_builder()` returns the guarded `reqwest::ClientBuilder` for a proxy, custom
+  TLS or a shared pool; `client::GuardedResolver`, `client::MAX_REDIRECTS`.
+- **`LintProfile::Ocpi3Ready`** and `lint_with`: `step_size_not_ocpi3_ready` reports every
+  `step_size` above 1, quoting the specification's advice for OCPI 3.0 readiness. `ocpi lint
+  --profile ocpi3` on the command line. `lint()` is unchanged.
+- `Validate for Terminal` reports a `terminal_id` of `activate`, which the payments branch now
+  reserves for the activation action.
+
+### Changed
+
+- **Payments re-pinned** to `2.3.0/release/payments` @ `5a961c25`. The two collections are now
+  normatively `{payments_endpoint_url}/terminals` and `…/financial-advice-confirmations` — what
+  the builders already produced; the tolerance for a peer advertising a sub-path stays. Two
+  Financial Advice Confirmation examples now decode.
+- **Breaking.** A client passed to `OcpiClient::from_http` that follows redirects itself now has
+  every redirected response refused; build it from `ClientConfig::http_builder()`.
+- `bon` and `thiserror` are enabled only by the features that use them, and the unused `rand`
+  dependency of `testkit` is gone.
+
+### Testing
+
+- CI runs the suite with the exact JSON boundary (`--all-features`) and the float one
+  (`--features full`).
+- Both halves of the specification's Complex Tariff example are tests. The Saturday breakdown's
+  € 12.28 is an arithmetic error in the specification; the test asserts the rule-derived
+  € 12.375 / € 13.975.
+- **Contributor tooling.** `xtask errata` holds every erratum to a recorded state (open, fixed
+  upstream, adopted); `--upstream` checks each pinned branch's head and every `watch` branch in
+  `spec-sources.toml`, and the weekly spec watch fails on a fix it does not record yet.
+  `spec-sources.toml` values are refused before reaching `git` unless they are plain ref names.
+- **Contributor tooling.** `spec-sync --fetch` and the censuses read the pinned specification
+  checkout from `$OCPI_REFERENCE/src/` when that variable is set, else from a git-ignored
+  directory of the checkout. The crate is unchanged.
+
+## [0.4.0] — 2026-09-15
 
 Four defects in the pricing engine's money path, one in the hub's error mapping, and one breaking
 simplification of the client API. Every fix has a regression test naming what it used to publish.
@@ -291,6 +363,8 @@ extract the specification's own examples into the round-trip suite.
 
 Name reservation. No functionality.
 
-[0.3.0]: https://github.com/hupe1980/ocpi-kit/compare/v0.2.0...HEAD
+[0.5.0]: https://github.com/hupe1980/ocpi-kit/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/hupe1980/ocpi-kit/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/hupe1980/ocpi-kit/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/hupe1980/ocpi-kit/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/hupe1980/ocpi-kit/releases/tag/v0.1.0

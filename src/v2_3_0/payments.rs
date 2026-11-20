@@ -6,9 +6,8 @@
 //! confirmations back so a CDR can be reconciled against what was actually captured at the
 //! payment service provider.
 //!
-//! **Spec erratum.** `payments` is missing from the `ModuleID` table in
-//! §version_information_endpoint_moduleid_enum of the same release that defines this chapter;
-//! see [`ModuleId::Payments`](crate::ModuleId::Payments).
+//! Both collections hang off the one advertised endpoint: `{payments_endpoint_url}/terminals`
+//! and `{payments_endpoint_url}/financial-advice-confirmations`.
 //!
 //! Spec: 2.3.0 §mod_payments_payments_module
 
@@ -161,6 +160,16 @@ impl Validate for Terminal {
                 "the CPO provides the invoice via invoice_base_url + authorization_reference",
             );
         }
+        // `…/terminals/activate` is the activation action; a Terminal by that id would occupy the
+        // same path as it.
+        if self.terminal_id.eq_ignore_case("activate") {
+            v.report_at(
+                "terminal_id",
+                ViolationCode::Inconsistent,
+                "\"The value `activate` SHALL NOT be used as a `terminal_id`\": it is the path of the \
+                 activation action",
+            );
+        }
     }
 }
 
@@ -279,6 +288,19 @@ mod tests {
         let t = terminal();
         assert!(!t.is_assigned());
         assert!(t.validate().is_ok());
+    }
+
+    #[test]
+    fn activate_is_reserved_and_is_reported_not_refused() {
+        // Decoding succeeds — parse permissively, validate explicitly.
+        let t: Terminal =
+            serde_json::from_str(r#"{"terminal_id":"ACTIVATE","last_updated":"2024-03-15T10:00:00Z"}"#)
+                .unwrap();
+        let violations = t.validate().unwrap_err();
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations.as_slice()[0].pointer, "/terminal_id");
+        assert_eq!(violations.as_slice()[0].code, ViolationCode::Inconsistent);
+        assert!(terminal().validate().is_ok(), "an ordinary id is fine");
     }
 
     #[test]

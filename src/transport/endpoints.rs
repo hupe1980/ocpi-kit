@@ -93,33 +93,23 @@ impl SenderEndpoint {
         self.base.join_segment(command)
     }
 
-    /// The Payments **terminals** sub-interface, `{payments}/terminals`.
+    /// The Payments **terminals** collection, `{payments_endpoint_url}/terminals`.
     ///
-    /// # Spec gap: one `ModuleID`, two endpoint URLs
+    /// > *"The two collections this module defines are reached at fixed sub-paths of that URL,
+    /// > so a peer can derive both from the one advertised endpoint."*
     ///
-    /// The Payments chapter declares *"Module Identifier: `payments`"* and then addresses its
-    /// two interfaces through two different variables,
-    /// `{payments_terminals_endpoint_url}` and
-    /// `{payments_financial_advice_confirmation_endpoint_url}`. Version discovery cannot express
-    /// that: an [`Endpoint`](crate::v2_3_0::versions::Endpoint) is keyed by `identifier` **and**
-    /// `role`, so one module and one interface role has exactly one URL. A PTP that advertised
-    /// both would have to publish two `payments`/`SENDER` endpoints, and a client reading them
-    /// would have no way to tell which was which.
-    ///
-    /// The reading this crate takes — and which the specification's own examples support, since
-    /// they are `…/payments/terminals/` and `…/payments/financial-advice-confirmations/` — is
-    /// that the discovered `payments` endpoint is the **base** the two hang off. This has been
-    /// reported upstream; until it is resolved, [`SenderEndpoint::payments_terminals`] and
-    /// [`SenderEndpoint::payments_financial_advice_confirmations`] also **tolerate** a peer that
-    /// advertised one of the sub-paths directly, so either reading interoperates.
+    /// Earlier text of the payments branch addressed the two collections through two endpoint
+    /// variables that version discovery could not express, and some peers advertised a sub-path
+    /// as their `payments` URL. Those still resolve: a base that already ends in the collection's
+    /// path is not extended again.
     #[must_use]
     pub fn payments_terminals(&self) -> Self {
         Self::new(sub_path(&self.base, "terminals"))
     }
 
-    /// The Payments **financial advice confirmations** sub-interface. See
-    /// [`payments_terminals`](Self::payments_terminals) for why this is derived rather than
-    /// discovered.
+    /// The Payments **financial advice confirmations** collection,
+    /// `{payments_endpoint_url}/financial-advice-confirmations`. See
+    /// [`payments_terminals`](Self::payments_terminals).
     #[must_use]
     pub fn payments_financial_advice_confirmations(&self) -> Self {
         Self::new(sub_path(&self.base, "financial-advice-confirmations"))
@@ -261,14 +251,14 @@ impl ReceiverEndpoint {
         }
     }
 
-    /// `{payments}/terminals` on a CPO's Receiver interface. See
-    /// [`SenderEndpoint::payments_terminals`] for why this is derived rather than discovered.
+    /// `{payments_endpoint_url}/terminals` on a CPO's Receiver interface. See
+    /// [`SenderEndpoint::payments_terminals`].
     #[must_use]
     pub fn payments_terminals(&self) -> Self {
         Self::new(sub_path(&self.base, "terminals"))
     }
 
-    /// `{payments}/financial-advice-confirmations` on a CPO's Receiver interface.
+    /// `{payments_endpoint_url}/financial-advice-confirmations` on a CPO's Receiver interface.
     #[must_use]
     pub fn payments_financial_advice_confirmations(&self) -> Self {
         Self::new(sub_path(&self.base, "financial-advice-confirmations"))

@@ -31,3 +31,8 @@ jobs:
             exit 1
           fi
           echo "::notice::every pinned OCPI branch is still at its pinned commit"
+      # A fix on a pinned branch's head or on a watched branch (an unmerged hotfix) that the
+      # errata table does not record yet fails here, naming the erratum, branch and commit.
+      - name: has upstream fixed a recorded erratum?
+        if: ${{ !cancelled() }}
+        run: cargo run -p xtask -- errata --upstream --check

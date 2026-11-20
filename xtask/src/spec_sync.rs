@@ -3,7 +3,8 @@
 //! The three censuses ([`coverage`](crate::coverage), [`enums`](crate::enums),
 //! [`shapes`](crate::shapes)) are this crate's strongest claim to conformance, and they are only
 //! worth as much as the documents they read. Those documents are **not** vendored — OCPI is
-//! published under CC BY-ND 4.0 — so what sits in `specs/src/` is whatever the person running the
+//! published under CC BY-ND 4.0 — so what sits in the checkout
+//! ([`spec_dir`](crate::spec_dir)) is whatever the person running the
 //! check happened to clone, whenever they happened to clone it.
 //!
 //! That is a hole, and upstream is exactly the kind of place it matters: the OCPI repository
@@ -40,7 +41,7 @@ use crate::Failure;
 /// One pinned specification release.
 #[derive(Debug, Clone)]
 pub struct Release {
-    /// Directory under `specs/src/`.
+    /// Directory under the spec checkout ([`crate::spec_dir`]).
     pub name: String,
     /// What it is, for a person reading the report.
     pub label: String,
@@ -50,6 +51,9 @@ pub struct Release {
     pub branch: String,
     /// The commit the crate is written against.
     pub commit: String,
+    /// Other upstream branches worth watching for this release — an unmerged hotfix, say.
+    /// `errata --upstream` evaluates every erratum there as well as at the branch head.
+    pub watch: Vec<String>,
 }
 
 /// The manifest file, relative to the repository root.
@@ -64,7 +68,7 @@ pub enum Mode {
     Report,
     /// Report drift and fail on it.
     Check,
-    /// Clone or check out every pinned commit into `specs/src/`.
+    /// Clone or check out every pinned commit into [`crate::spec_dir`].
     Fetch,
     /// Rewrite the lock from the working checkout.
     Update,
@@ -120,18 +124,15 @@ fn check(root: &Path, releases: &[Release], fail_on_drift: bool) -> Result<bool,
     let mut clean = true;
     let mut checked = 0usize;
     for release in releases {
-        let dir = root.join("specs/src").join(&release.name);
+        let dir = crate::spec_dir(root).join(&release.name);
         if !dir.is_dir() {
             println!("{}: not vendored (run --fetch)", release.name);
             clean = false;
             continue;
         }
         let now = digest_tree(&dir)?;
-        let then: BTreeMap<&String, &String> = lock
-            .iter()
-            .filter(|(path, _)| path.starts_with(&format!("{}/", release.name)))
-            .map(|(path, digest)| (path, digest))
-            .collect();
+        let then: BTreeMap<&String, &String> =
+            lock.iter().filter(|(path, _)| path.starts_with(&format!("{}/", release.name))).collect();
 
         let mut drift = Vec::new();
         for (path, digest) in &now {
@@ -187,7 +188,7 @@ fn check(root: &Path, releases: &[Release], fail_on_drift: bool) -> Result<bool,
 
 /// Clones or checks out each pinned commit.
 fn fetch(root: &Path, releases: &[Release]) -> Result<bool, Failure> {
-    let specs = root.join("specs/src");
+    let specs = crate::spec_dir(root);
     std::fs::create_dir_all(&specs)?;
     for release in releases {
         let dir = specs.join(&release.name);
@@ -213,7 +214,7 @@ fn fetch(root: &Path, releases: &[Release]) -> Result<bool, Failure> {
 fn update(root: &Path, releases: &[Release]) -> Result<bool, Failure> {
     let mut lock: BTreeMap<String, String> = BTreeMap::new();
     for release in releases {
-        let dir = root.join("specs/src").join(&release.name);
+        let dir = crate::spec_dir(root).join(&release.name);
         if !dir.is_dir() {
             return Err(format!("{} is not vendored; run --fetch first", release.name).into());
         }
@@ -242,7 +243,7 @@ fn update(root: &Path, releases: &[Release]) -> Result<bool, Failure> {
 fn latest(root: &Path, releases: &[Release]) -> Result<bool, Failure> {
     let mut moved = false;
     for release in releases {
-        let dir = root.join("specs/src").join(&release.name);
+        let dir = crate::spec_dir(root).join(&release.name);
         if !dir.join(".git").is_dir() {
             println!("{}: not a git checkout; run --fetch first", release.name);
             continue;
@@ -311,7 +312,7 @@ fn digest_tree(dir: &Path) -> Result<BTreeMap<String, String>, Failure> {
 /// A deliberately small reader for a deliberately small file: five tables of five string fields.
 /// Pulling in a TOML parser for that would add a dependency to the one crate in this repository
 /// whose dependencies nobody audits.
-fn read_manifest(path: &Path) -> Result<Vec<Release>, Failure> {
+pub(crate) fn read_manifest(path: &Path) -> Result<Vec<Release>, Failure> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let mut releases = Vec::new();
     let mut current: BTreeMap<String, String> = BTreeMap::new();
@@ -324,13 +325,38 @@ fn read_manifest(path: &Path) -> Result<Vec<Release>, Failure> {
         let take = |key: &str, fields: &BTreeMap<String, String>| -> Result<String, Failure> {
             fields.get(key).cloned().ok_or_else(|| format!("a [[release]] has no `{key}`").into())
         };
-        out.push(Release {
+        let watch: Vec<String> = fields
+            .get("watch")
+            .map(|list| {
+                list.trim_matches(['[', ']'])
+                    .split(',')
+                    .map(|item| item.trim().trim_matches('"').to_owned())
+                    .filter(|item| !item.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let release = Release {
             name: take("name", fields)?,
             label: take("label", fields)?,
             repo: take("repo", fields)?,
             branch: take("branch", fields)?,
             commit: take("commit", fields)?,
-        });
+            watch,
+        };
+        // Every one of these reaches `git` as an argument. A value starting with `-` would be read
+        // as an option (`--upload-pack=…` runs a command), so the manifest is held to plain ref
+        // and directory names before anything is executed.
+        for (field, value) in
+            [("name", &release.name), ("branch", &release.branch), ("commit", &release.commit)]
+                .into_iter()
+                .chain(release.watch.iter().map(|w| ("watch", w)))
+        {
+            check_ref_like(field, value)?;
+        }
+        if !release.repo.starts_with("https://") || release.repo.contains(char::is_whitespace) {
+            return Err(format!("{MANIFEST}: `repo` {:?} must be an https:// URL", release.repo).into());
+        }
+        out.push(release);
         fields.clear();
         Ok(())
     };
@@ -349,7 +375,10 @@ fn read_manifest(path: &Path) -> Result<Vec<Release>, Failure> {
             continue;
         }
         let Some((key, value)) = line.split_once('=') else { continue };
-        let value = value.trim().trim_matches('"').to_owned();
+        let value = value.trim();
+        // A one-line array keeps its brackets for `finish` to split; a string loses its quotes.
+        let value =
+            if value.starts_with('[') { value.to_owned() } else { value.trim_matches('"').to_owned() };
         current.insert(key.trim().to_owned(), value);
     }
     finish(&mut current, &mut releases)?;
@@ -376,7 +405,21 @@ fn read_lock(path: &Path) -> Result<BTreeMap<String, String>, Failure> {
     Ok(out)
 }
 
-fn git(dir: &Path, args: &[&str]) -> Result<(), Failure> {
+/// Refuses a manifest value that `git` could read as an option, or that is not a plain ref name.
+fn check_ref_like(field: &str, value: &str) -> Result<(), Failure> {
+    let plain = !value.is_empty()
+        && !value.starts_with('-')
+        && !value.contains("..")
+        && value.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '-'));
+    if plain {
+        Ok(())
+    } else {
+        Err(format!("{MANIFEST}: `{field}` {value:?} is not a plain ref name; refusing to pass it to git")
+            .into())
+    }
+}
+
+pub(crate) fn git(dir: &Path, args: &[&str]) -> Result<(), Failure> {
     let status = Command::new("git")
         .current_dir(dir)
         .args(args)
@@ -388,7 +431,7 @@ fn git(dir: &Path, args: &[&str]) -> Result<(), Failure> {
     Err(format!("git {} failed in {}", args.join(" "), dir.display()).into())
 }
 
-fn capture(dir: &Path, args: &[&str]) -> Result<String, Failure> {
+pub(crate) fn capture(dir: &Path, args: &[&str]) -> Result<String, Failure> {
     let output = Command::new("git")
         .current_dir(dir)
         .args(args)
@@ -405,7 +448,7 @@ fn capture(dir: &Path, args: &[&str]) -> Result<String, Failure> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn short(commit: &str) -> &str {
+pub(crate) fn short(commit: &str) -> &str {
     &commit[..commit.len().min(10)]
 }
 
@@ -499,10 +542,10 @@ fn sha256_hex(data: &[u8]) -> String {
     }
     message.extend_from_slice(&bits.to_be_bytes());
 
-    for chunk in message.chunks_exact(64) {
+    for chunk in message.as_chunks::<64>().0 {
         let mut w = [0u32; 64];
-        for (i, word) in chunk.chunks_exact(4).enumerate() {
-            w[i] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
+        for (i, word) in chunk.as_chunks::<4>().0.iter().enumerate() {
+            w[i] = u32::from_be_bytes(*word);
         }
         for i in 16..64 {
             let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
@@ -552,6 +595,46 @@ mod tests {
             sha256_hex(&b"a".repeat(1000)),
             "41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3"
         );
+    }
+
+    #[test]
+    fn a_value_git_would_read_as_an_option_is_refused_before_git_runs() {
+        let dir = std::env::temp_dir().join("xtask-manifest-injection");
+        std::fs::create_dir_all(&dir).unwrap();
+        for (field, value) in [
+            ("branch", "\"--upload-pack=touch /tmp/pwned\""),
+            ("branch", "\"main;rm -rf /\""),
+            ("watch", "[\"ok/branch\", \"-c core.sshCommand=x\"]"),
+            ("commit", "\"HEAD..main\""),
+        ] {
+            let mut fields = vec![
+                ("name", "\"ocpi-x\""),
+                ("label", "\"x\""),
+                ("repo", "\"https://github.com/ocpi/ocpi.git\""),
+                ("branch", "\"main\""),
+                ("commit", "\"0123abcd\""),
+            ];
+            fields.retain(|(k, _)| *k != field);
+            fields.push((field, value));
+            let body: String = fields.iter().map(|(k, v)| format!("{k} = {v}\n")).collect();
+            let path = dir.join("m.toml");
+            std::fs::write(&path, format!("[[release]]\n{body}")).unwrap();
+            let error = read_manifest(&path).expect_err(value).to_string();
+            assert!(error.contains("not a plain ref name"), "{field}={value}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_watch_list_is_read() {
+        let path = std::env::temp_dir().join("xtask-manifest-watch.toml");
+        std::fs::write(
+            &path,
+            "[[release]]\nname = \"a\"\nlabel = \"l\"\nrepo = \"https://e.com/o.git\"\nbranch = \"b\"\ncommit = \"c\"\n\
+             watch = [\"2.3.0/hotfix/core-editorial\", \"x\"]\n",
+        )
+        .unwrap();
+        let releases = read_manifest(&path).unwrap();
+        assert_eq!(releases[0].watch, ["2.3.0/hotfix/core-editorial", "x"]);
     }
 
     #[test]

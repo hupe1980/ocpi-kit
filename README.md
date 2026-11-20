@@ -90,6 +90,8 @@ That is what lets two parties compare reasoning instead of comparing totals and 
 | `ocpi` CLI | `cli` | `validate`, `versions`, `pull`, `price`, `convert`, `conformance`, `serve-mock`, `schema` |
 
 Default features are `v2_3_0`, `v2_2_1` and `transport`. `full` turns on everything except the CLI.
+`exact-json` makes the JSON boundary itself exact — every number read from and written as its
+literal, no float in between ([numbers](https://hupe1980.github.io/ocpi-kit/docs/concepts/numbers/)).
 
 ## Client
 
@@ -124,13 +126,11 @@ while let Some(location) = locations.next().await? {
 }
 ```
 
-The client **refuses to call a URL it should not**: `Credentials.url`, `Endpoint.url` and every
-`response_url` are attacker-influenced, so a `UrlPolicy` rejects plain HTTP, loopback and private
-addresses by default — with an [explicit note on what URL inspection alone cannot
-do](https://hupe1980.github.io/ocpi-kit/docs/reference/security/), because a policy that oversells
-itself is worse than none. It **validates what it sends** (`ClientConfig::validate_outgoing`, on by
-default). It **only retries `GET`**, because the spec says messages must not be queued and
-replayed. And it never logs a token.
+The client **refuses to connect where it should not.** Every URL a peer hands it is checked
+against a `UrlPolicy` (HTTPS only, no private networks), on every redirect hop and on the address
+actually connected to, so DNS rebinding and a `302` to cloud metadata both fail
+([security](https://hupe1980.github.io/ocpi-kit/docs/reference/security/)). It **validates what it
+sends**, **only retries `GET`**, as the spec requires, and never logs a token.
 
 ## Server
 
@@ -291,13 +291,15 @@ always match, so this Price Component can never apply. The unrestricted element 
 and belongs last
 ```
 
-Fifteen findings, each with a JSON Pointer: an element made dead by a fallback placed before it, a
+Each finding carries a JSON Pointer: an element made dead by a fallback placed before it, a
 `TIME` `step_size` that `PARKING_TIME` will always absorb, a restriction window that excludes
 everything, `min_kwh` above `max_kwh`, a VAT rate on a tariff that says no tax applies, a
 reservation element pricing a dimension a reservation cannot have. Every one of them decodes
 cleanly, validates cleanly, prices sessions — and bills something other than what was intended.
 
-It finds one in the specification's own `tariff_13` example.
+It finds one in the specification's own `tariff_13` example. `ocpi lint --profile ocpi3` (or
+`lint_with(&tariff, LintProfile::Ocpi3Ready)`) also lists every `step_size` a CPO should set to 1
+to be ready for OCPI 3.0, which drops the field.
 
 Ten of the specification's own worked examples are tests, and two more are snapshots — the
 `step_size` example rendered in full, next to the same session under the OCPI 3.0 policy that has
@@ -390,10 +392,9 @@ in place, without a version bump — a module can move between 2.3.0 core and a 
 an unchanged version number — so a weekly job runs `spec-sync --latest` and fails when a pinned
 branch moves.
 
-The numbers, all matching: 274 object comparisons across five releases, 157 enums, 1,367 field
-cardinalities and lengths, 16 endpoint URL structures, 19 recorded specification defects, 728
-fields reaching the validator. An erratum that gets **fixed** upstream fails the build rather than
-leaving a false claim in the documentation.
+Every recorded specification defect is a predicate with a state — open, fixed upstream, adopted
+— and the weekly job also checks each pinned branch's head and the unmerged hotfix branch, so a fix
+upstream fails a build rather than leaving a false claim in the documentation.
 
 `dead-config` fails the build if a public field of `Quirks`, `ClientConfig`, `ServerConfig`,
 `PricingPolicy` or `UrlPolicy` is only ever *assigned* and never read. A configuration field that
@@ -451,7 +452,7 @@ and ships.
   they say nothing about whether what comes out is legible.
 * **The conformance runner pointed at our own server**, so the two keep each other honest.
 
-584 tests across twelve targets. Clippy at `pedantic` with `-D warnings` under three feature sets,
+Clippy at `pedantic` with `-D warnings` under three feature sets,
 every feature and every pair of layer features compiled, `cargo deny`, and benchmarks for what the
 guarantees cost:
 

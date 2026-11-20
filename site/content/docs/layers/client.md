@@ -145,8 +145,11 @@ uncorrelated offset and the behaviour is reproducible in tests.
 ## What the client does that a hand-rolled one usually does not
 
 * **It refuses to call a URL it should not.** `Credentials.url`, `Endpoint.url` and every
-  `response_url` are attacker-influenced inputs. A `UrlPolicy` rejects plain HTTP, loopback and
-  private addresses by default; a client that fetches them unconditionally is an SSRF proxy.
+  `response_url` are attacker-influenced inputs; a client that fetches them unconditionally is an
+  SSRF proxy. A `UrlPolicy` (HTTPS only, no private networks by default) is enforced on the URL, on
+  every redirect hop and on the address actually connected to — see
+  [Security](@/docs/reference/security.md). `ClientConfig::http_builder()` keeps that guard when
+  you need a proxy or a shared pool.
 * **It validates what it sends.** On by default, so a non-conformant object is caught here rather
   than at the partner's support desk.
 * **It only retries `GET`.** Never a POST, PUT or PATCH, for the reason above.

@@ -59,7 +59,7 @@ pub use breakdown::{
 };
 pub use engine::PricingEngine;
 pub use input::{PricedPeriod, PricedSession};
-pub use lint::{TariffLint, TariffLintCode, lint};
+pub use lint::{LintProfile, TariffLint, TariffLintCode, lint, lint_with};
 pub use policy::{PricingPolicy, Quantisation};
 pub use verify::{CdrVerification, Discrepancy, Divergence, verify_cdr, verify_cdr_within};
 
@@ -746,6 +746,61 @@ mod tests {
         assert_eq!(b.total_incl_vat, n("8.85"));
     }
 
+    /// §mod_tariffs "Complex Tariff example", priced from the specification's own JSON.
+    fn complex_tariff() -> Tariff {
+        serde_json::from_str(include_str!("../../fixtures/2.3.0/tariff_4_complex.json")).unwrap()
+    }
+
+    fn complex_session(start: &str, charging: u32, parking: u32, amps: &str) -> PricedSession {
+        let begin = dt(start);
+        let parked =
+            DateTime::from_unix_timestamp(begin.unix_timestamp() + i64::from(charging) * 60).unwrap();
+        PricedSession::new(begin, TimeZone::utc())
+            .with_period(PricedPeriod {
+                charging_hours: minutes(charging),
+                max_current_a: Some(n(amps)),
+                min_current_a: Some(n(amps)),
+                ..PricedPeriod::new(begin)
+            })
+            .with_period(PricedPeriod { parking_hours: minutes(parking), ..PricedPeriod::new(parked) })
+    }
+
+    #[test]
+    fn spec_example_complex_tariff_on_a_monday_morning() {
+        // "a charging session on a Monday morning starting at 09:30 which takes 2:45 hours …
+        //  a maximum of 16A … parking for an additional 42 minutes … € 9.00 (excl. VAT) or
+        //  € 10.30 (incl. VAT)". Parking 42 → 45 minutes; charging is not rounded.
+        let b = PricingEngine::new()
+            .price(&complex_session("2024-01-15T09:30:00Z", 165, 42, "16"), &[complex_tariff()])
+            .unwrap();
+        assert_close(b.dimension(TariffDimensionType::ParkingTime).unwrap().billed, minutes(45));
+        assert_eq!(b.total_excl_vat, n("9.00"));
+        assert_eq!(b.total_incl_vat, n("10.30"));
+    }
+
+    #[test]
+    fn spec_example_complex_tariff_on_a_saturday_follows_the_rules_not_the_arithmetic() {
+        // "a charging session on a Saturday afternoon starting at 13:30 which takes 1:54 hours …
+        //  a minimum of 43A … parking for an additional 71 minutes … € 12.28 (excl. VAT) or
+        //  € 13.861 (incl. VAT)". The breakdown prices the 1.25/h row at 1.20/h: 114 minutes at
+        //  € 1.25/h is € 2.375, not € 2.28. When a worked example's arithmetic and the rules it
+        //  illustrates disagree, the engine follows the rules — the figures the specification's
+        //  own editorial fix arrives at: € 12.375 / € 13.975 before currency rounding.
+        let b = PricingEngine::new()
+            .price(&complex_session("2024-01-20T13:30:00Z", 114, 71, "43"), &[complex_tariff()])
+            .unwrap();
+        let charging = b.dimension(TariffDimensionType::Time).unwrap();
+        assert_eq!(charging.billed, charging.measured, "followed by parking, so not rounded");
+        assert_close(b.dimension(TariffDimensionType::ParkingTime).unwrap().billed, minutes(75));
+        // 114 minutes at the row's own € 1.25/h — the specification's breakdown says € 2.28.
+        let charging_cost: Number = charging.segments.iter().map(|s| s.cost).sum();
+        assert_close(charging_cost, n("2.375"));
+        assert_close(b.dimension_total(TariffDimensionType::ParkingTime), n("7.50"));
+        // 2.50 + 2.375 + 7.50 = 12.375 and 2.875 + 2.85 + 8.25 = 13.975, at currency precision.
+        assert_eq!(b.total_excl_vat, n("12.38"), "not the specification's 12.28");
+        assert_eq!(b.total_incl_vat, n("13.98"), "not the specification's 13.861");
+    }
+
     #[test]
     fn spec_example_max_power_restrictions_switch_the_rate() {
         // "1 kWh at 6 kW: € 0.20; 40 kWh at 48 kW: € 20.00; 0.5 kWh at 4 kW: € 0.10 → € 20.30"
@@ -900,7 +955,7 @@ mod tests {
         assert_eq!(b.total_excl_vat, n("2.00"), "2.20 ÷ 1.10");
         assert_eq!(b.total_vat(), n("0.20"));
         assert_taxes_add_up(&b);
-        assert!(b.notes.is_empty());
+        assert_eq!(b.notes, []);
     }
 
     #[test]

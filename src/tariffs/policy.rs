@@ -209,7 +209,12 @@ mod tests {
         // in the breakdown that the crate's own validator flags as imprecise.
         let p = PricingPolicy::default();
         let eight_minutes = n("8") / n("60");
-        assert!(!eight_minutes.json_round_trips(), "the raw quantity does not");
+        // In exact-JSON mode every value round-trips; the rounding is still what makes the
+        // breakdown readable, so only the float-mode half of the claim is conditional.
+        assert!(
+            Number::exact_json_active() || !eight_minutes.json_round_trips(),
+            "the raw quantity does not"
+        );
         let reported = p.round_quantity(eight_minutes);
         assert_eq!(reported, n("0.133333"));
         assert!(reported.json_round_trips());

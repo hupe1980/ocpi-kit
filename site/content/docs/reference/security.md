@@ -1,7 +1,7 @@
 +++
 title = "Security"
 weight = 40
-description = "Token handling, the SSRF guard on peer-supplied URLs, ownership checks, and limits."
+description = "Token handling, the SSRF guard on peer-supplied URLs — every hop, every connection — ownership checks, and limits."
 +++
 
 OCPI's security model is bearer tokens over TLS, and the specification says relatively little
@@ -27,21 +27,36 @@ an asynchronous command are **supplied by a peer**. A client or hub that fetches
 unconditionally is an SSRF proxy into your infrastructure, and a hub is an especially good one
 because it has network access to fifty other parties.
 
-`UrlPolicy` is applied to every outgoing URL, and by default it refuses:
+A `UrlPolicy` decides where the client may go, and the client enforces it **three times**:
 
-* plain `http://`
-* loopback (`127.0.0.0/8`, `::1`, `localhost`, `*.localhost`, `*.local`)
-* private, link-local, carrier-grade-NAT and documentation ranges
-* the same addresses spelled as IPv6: `::ffff:169.254.169.254`, the deprecated
-  `::169.254.169.254`, and the NAT64 prefix `64:ff9b::169.254.169.254` — an allow-list that only
-  knew the dotted-quad form would wave all three through
+1. **On the URL.** By default it refuses plain `http://`, the names `localhost`, `*.localhost` and
+   `*.local`, and any IP literal that is not globally reachable.
+2. **On every redirect hop.** The HTTP client never follows a redirect by itself. The client
+   follows one only for a `GET`, only within the origin it asked (or an `http` → `https` upgrade
+   of it), only to a URL the policy accepts, and at most five times. A redirect on a write is
+   never followed: it would be replayed or silently turned into a `GET`. Without this rule, one
+   `302` to `http://169.254.169.254/` reaches the cloud metadata service.
+3. **On the address connected to.** A resolver in the connection path drops every resolved
+   address the policy refuses. A host name whose record says `10.0.0.5` is refused; so is one
+   that answers publicly when checked and privately when connected (DNS rebinding), because the
+   addresses checked *are* the addresses connected to.
+
+"Not globally reachable" means the IANA special-purpose registries, not a short list: private,
+loopback, link-local, carrier-grade NAT, `0.0.0.0/8`, benchmarking, documentation (both
+families), multicast, reserved space — and the same addresses spelled inside IPv6
+(`::ffff:169.254.169.254`, `::169.254.169.254`, NAT64 `64:ff9b::a9fe:a9fe`). The 6to4 and Teredo
+tunnels are refused outright. `UrlPolicy::permits_address` exposes the rule, so code that has to
+judge an address itself uses the same one.
+
+Every refusal is `OcpiError::UrlRefused` with the URL (query and fragment removed) and a reason a
+person can act on — never a generic transport error, and never retried.
 
 ```rust
 // For local development against a test peer, and nothing else:
 let client = OcpiClient::with_config(ClientConfig::for_testing())?;
 
 // Or relax exactly one thing, and nothing else:
-let config = ClientConfig { url_policy: UrlPolicy::default().allowing_http(), ..Default::default() };
+let config = ClientConfig::default().with_url_policy(UrlPolicy::default().allowing_http());
 ```
 
 `UrlPolicy` also has `with_allowed_hosts` for a per-peer allow-list, `allowing_private_networks`,
@@ -49,23 +64,28 @@ and `permissive()` for tests.
 
 The CLI exposes the same decision as `--insecure`, with the reason in its help text.
 
-### What URL inspection cannot do
+### Bringing your own HTTP client
 
-A `UrlPolicy` sees the URL, and only the URL. It cannot see where a **host name** resolves, so
-`https://ptp.example.com/cb` passes even when that name has an `A` record for `169.254.169.254` —
-and a name that resolves differently between the check and the connection defeats it outright, the
-classic DNS rebind. Closing that needs a resolver in the connection path, which belongs to the
-HTTP client rather than to a URL type.
+Need a proxy, custom TLS roots or a shared connection pool? Start from the guarded builder, so the
+redirect rule and the resolver come with it:
 
-So this is the first of two layers, not the whole defence. The literal-IP rules above stop the
-careless cases; two other things stop the deliberate ones:
+```rust
+let config = ClientConfig::default();
+let http = config.http_builder().pool_max_idle_per_host(32).build()?;
+let client = OcpiClient::from_http(http, config);
+```
 
-* `with_allowed_hosts` — an explicit list per peer is subject to neither problem. You already know
-  which host your partner's endpoints live on; discovery does not have to be trusted to tell you.
-* An **egress policy on the network** that refuses the link-local and private ranges outright,
-  regardless of what any application resolved.
+A client built any other way keeps the URL check but loses the address check — and if it follows
+redirects itself (`reqwest`'s default), every response it reached by one is refused, loudly, after
+the fact.
 
-A test asserts the limitation, so it cannot quietly turn into a false sense of safety.
+### What remains a deployment's job
+
+* **Behind an HTTP proxy** the resolver sees the proxy, not the target: the proxy is then where
+  egress rules for the target are enforced.
+* `with_allowed_hosts` is still the strongest control: you already know which host your partner's
+  endpoints live on, and discovery does not have to be trusted to tell you.
+* An **egress policy on the network** remains good practice, as a second net under the first.
 
 ## Identifiers in URLs
 
@@ -126,5 +146,6 @@ to generate.
 ## What is still yours to do
 
 Terminating TLS, rotating tokens on a schedule, generating unguessable callback ids, and deciding
-what your `UrlPolicy` allows in production — including whether an egress policy backs it up.
+what your `UrlPolicy` allows in production — including whether a proxy or an egress policy backs
+it up.
 `ocpi-kit` gives you a token rotation API and a policy type; it cannot know your network.

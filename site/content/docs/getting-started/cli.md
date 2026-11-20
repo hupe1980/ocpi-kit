@@ -82,7 +82,7 @@ restrictions always match, so this Price Component can never apply. …
 element made unreachable by a fallback placed before it, a `step_size` that `PARKING_TIME` will
 always absorb, a restriction window that excludes everything, a VAT rate on a tariff that says no
 tax applies. Every finding decodes, validates and prices sessions — and bills something other than
-what was written down.
+what was written down. `--profile ocpi3` adds every `step_size` OCPI 3.0 no longer has.
 
 `--json` for a pipeline. **Exits non-zero when there are findings**, so tariff publishing can be
 gated on it. See [Tariffs](@/docs/layers/tariffs.md).

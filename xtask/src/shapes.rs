@@ -79,7 +79,7 @@ const DELIBERATE: &[(&str, &str, &str, &str)] = &[
 /// Fails when the vendored specification or the crate source cannot be read, or when one of the
 /// [`ALIASES`] no longer resolves to what it claims.
 pub fn report(root: &Path, check: bool) -> Result<bool, Failure> {
-    let specs = root.join("specs/src");
+    let specs = crate::spec_dir(root);
     if !specs.is_dir() {
         return Err(format!("{} does not exist; vendor the spec first", specs.display()).into());
     }
