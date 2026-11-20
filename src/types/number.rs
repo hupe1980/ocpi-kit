@@ -24,21 +24,18 @@ use super::validate::{Validate, Validator, ViolationCode};
 ///
 /// # The JSON boundary
 ///
-/// The spec requires these values to be JSON *numbers*, not strings. `serde_json` represents a
-/// fractional JSON number as an `f64` unless its `arbitrary_precision` feature is enabled — a
-/// feature that changes `serde_json::Value` globally for every crate in the build, so
-/// `ocpi-kit` does not impose it. The boundary therefore behaves as follows:
+/// The spec requires JSON *numbers*. How exact the boundary is depends on `serde_json`'s
+/// build-wide `arbitrary_precision` feature, which the `exact-json` feature enables and any other
+/// crate can too; [`Number::exact_json_active`] says which mode is in effect. Both work.
 ///
-/// * Integral values pass through exactly, as JSON integers.
-/// * Fractional values with at most 15 significant decimal digits — which covers OCPI's entire
-///   domain of prices, energies and percentages with room to spare — pass through exactly,
-///   because the shortest decimal that round-trips an `f64` *is* the original decimal.
-/// * Beyond that, a round-trip rounds to the nearest `f64`. [`Number::json_round_trips`] says
-///   whether a given value is affected and [`Validate::validate`] reports it as
-///   [`ViolationCode::Imprecise`], so this can never happen silently.
+/// * **Exact mode**: every number is read from its literal and written as one; no float.
+/// * **Float mode** (default): integers and fractions up to 15 significant digits — all of
+///   OCPI's practical range — pass through exactly. Longer values round to the nearest `f64`;
+///   [`Number::json_round_trips`] and [`ViolationCode::Imprecise`] say so, never silently.
 ///
-/// A peer that sends a number as a JSON *string* (`"0.25"`) is tolerated on input and parsed
-/// exactly; output is always a JSON number.
+/// Both modes normalise (`0.2500` is `0.25`) and produce the same JSON for every value a float
+/// can carry. Past 28 significant digits a literal is rounded; past the [`Decimal`] range it is
+/// refused. A quoted number (`"0.25"`) is accepted and written back unquoted.
 ///
 /// ```
 /// use ocpi_kit::types::Number;
@@ -85,14 +82,20 @@ impl Number {
 
     /// Whether this value survives a JSON round-trip unchanged.
     ///
-    /// See [the type documentation](Self#the-json-boundary). `false` only for values with more
-    /// significant digits than an `f64` can carry.
+    /// See [the type documentation](Self#the-json-boundary). Always `true` in exact mode; in
+    /// float mode `false` only for values with more significant digits than an `f64` can carry.
     #[must_use]
     pub fn json_round_trips(self) -> bool {
-        if self.0.is_integer() && self.0.to_i64().is_some() {
-            return true;
-        }
-        self.0.to_f64().and_then(decimal_from_f64).is_some_and(|d| d == self.0.normalize())
+        exact_json_active() || float_round_trips(self.0)
+    }
+
+    /// Whether `serde_json`'s exact-number mode (`arbitrary_precision`) is active in this build.
+    ///
+    /// Enabled by this crate's `exact-json` feature or by any other crate: Cargo unifies features,
+    /// so a `cfg` cannot know and this is answered at runtime, once.
+    #[must_use]
+    pub fn exact_json_active() -> bool {
+        exact_json_active()
     }
 
     /// Whether the value is zero.
@@ -259,6 +262,50 @@ fn decimal_from_f64(value: f64) -> Option<Decimal> {
     Decimal::from_str_exact(&value.to_string()).ok()
 }
 
+/// Whether `value` survives the float path of the JSON boundary unchanged.
+fn float_round_trips(value: Decimal) -> bool {
+    if value.is_integer() && value.to_i64().is_some() {
+        return true;
+    }
+    value.to_f64().and_then(decimal_from_f64).is_some_and(|d| d == value.normalize())
+}
+
+/// The key under which `serde_json`'s `arbitrary_precision` mode carries a number's literal.
+const SERDE_JSON_NUMBER_TOKEN: &str = "$serde_json::private::Number";
+
+/// Whether `serde_json` keeps number literals exactly in this build. See
+/// [`Number::exact_json_active`].
+fn exact_json_active() -> bool {
+    static ACTIVE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ACTIVE.get_or_init(|| {
+        // More digits than an f64 carries: only an exact representation gives them back.
+        const PROBE: &str = "0.10000000000000000001";
+        serde_json::from_str::<serde_json::Number>(PROBE).is_ok_and(|n| n.to_string() == PROBE)
+    })
+}
+
+/// Parses a JSON number literal from the wire exactly.
+///
+/// Plain literals keep every digit up to the 28 a [`Decimal`] holds and are rounded beyond that —
+/// never refused, so exact mode accepts everything float mode does. Exponent literals are scaled
+/// exactly. A magnitude outside the decimal range is refused, quoting at most 40 characters of
+/// the literal so a hostile peer cannot fill a log line.
+///
+/// The result is normalised (`5.00` is `5`), which is what the float path produces too: a value
+/// decodes to the same `Number`, displayed the same way, whichever mode the build is in.
+fn parse_literal(literal: &str) -> Result<Decimal, InvalidNumber> {
+    let parsed = if literal.contains(['e', 'E']) {
+        Decimal::from_scientific(literal)
+    } else {
+        Decimal::from_str_exact(literal).or_else(|_| Decimal::from_str(literal))
+    };
+    parsed.map(|d| d.normalize()).map_err(|e| {
+        let shown: String = literal.chars().take(40).collect();
+        let ellipsis = if literal.chars().count() > 40 { "…" } else { "" };
+        InvalidNumber(format!("{shown:?}{ellipsis}: {e}"))
+    })
+}
+
 /// Why a decimal could not be parsed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InvalidNumber(String);
@@ -288,6 +335,16 @@ impl Serialize for Number {
                 return serializer.serialize_u64(u);
             }
         }
+        // Only a value the float path would round needs the exact form. Everything else is
+        // written as a plain float, which serde_json prints identically in both modes and which
+        // every other serializer (YAML, snapshots, CBOR) understands: serde_json's private
+        // wrapper is a map to anyone but serde_json.
+        if exact_json_active()
+            && !float_round_trips(self.0)
+            && let Ok(exact) = serde_json::Number::from_str(&self.0.normalize().to_string())
+        {
+            return exact.serialize(serializer);
+        }
         let f = self
             .0
             .to_f64()
@@ -299,7 +356,7 @@ impl Serialize for Number {
 impl<'de> Deserialize<'de> for Number {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         struct V;
-        impl serde::de::Visitor<'_> for V {
+        impl<'de> serde::de::Visitor<'de> for V {
             type Value = Number;
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 f.write_str("a JSON number")
@@ -323,7 +380,20 @@ impl<'de> Deserialize<'de> for Number {
             }
             fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Number, E> {
                 // Tolerated: some peers quote their numbers. Parsed exactly, emitted unquoted.
-                Number::from_str(v).map_err(E::custom)
+                parse_literal(v).map(Number).map_err(E::custom)
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Number, A::Error> {
+                use serde::de::{Error as _, Unexpected};
+                // serde_json's exact mode presents a number as a one-entry map holding its
+                // literal. Outside that mode an object is an object, and not a number.
+                if !exact_json_active() {
+                    return Err(A::Error::invalid_type(Unexpected::Map, &self));
+                }
+                if map.next_key::<std::borrow::Cow<'de, str>>()?.as_deref() != Some(SERDE_JSON_NUMBER_TOKEN) {
+                    return Err(A::Error::invalid_type(Unexpected::Map, &self));
+                }
+                let literal: std::borrow::Cow<'de, str> = map.next_value()?;
+                parse_literal(&literal).map(Number).map_err(A::Error::custom)
             }
         }
         deserializer.deserialize_any(V)
@@ -415,6 +485,9 @@ mod tests {
 
     #[test]
     fn excess_precision_is_flagged_rather_than_hidden() {
+        if exact_json_active() {
+            return; // nothing is rounded in exact mode, so there is nothing to flag
+        }
         let precise = n("0.123456789012345678901234");
         assert!(!precise.json_round_trips());
         assert_eq!(precise.validate().unwrap_err().as_slice()[0].code, ViolationCode::Imprecise);
@@ -425,6 +498,88 @@ mod tests {
         let parsed: Number = serde_json::from_str("\"0.25\"").unwrap();
         assert_eq!(parsed, n("0.25"));
         assert_eq!(serde_json::to_string(&parsed).unwrap(), "0.25");
+    }
+
+    #[test]
+    fn exponent_literals_and_quoted_numbers_are_exact() {
+        let parsed: Number = serde_json::from_str("\"2.5E2\"").unwrap();
+        assert_eq!(parsed, n("250"));
+        assert_eq!(parse_literal("1e-3").unwrap(), Decimal::new(1, 3));
+        assert_eq!(parse_literal("-0").unwrap(), Decimal::ZERO);
+    }
+
+    #[test]
+    fn a_hostile_literal_is_refused_without_panicking_or_flooding_the_log() {
+        let huge = "9".repeat(10_000);
+        for literal in ["1e999999999", "-1e999999999", huge.as_str(), "1e-999999999"] {
+            let error = match parse_literal(literal) {
+                Err(e) => e.to_string(),
+                // A vanishingly small value may legitimately round to zero; it must not panic.
+                Ok(value) => {
+                    assert!(value.is_zero(), "{literal:.20} decoded to {value}");
+                    continue;
+                }
+            };
+            assert!(error.chars().count() < 120, "{error}");
+        }
+    }
+
+    #[test]
+    fn excess_digits_round_to_what_a_decimal_holds_rather_than_failing() {
+        // What a peer writes when it prints an f64 in full. Float mode accepts it (via the f64),
+        // so exact mode must too.
+        let value = parse_literal("0.1000000000000000055511151231257827021181583404541015625").unwrap();
+        assert_eq!(value.to_string(), "0.1000000000000000055511151231");
+    }
+
+    #[test]
+    fn output_is_the_same_text_in_both_modes() {
+        // Normalised, so fixtures and snapshots do not depend on which mode wrote them.
+        for (input, written) in [("0.2500", "0.25"), ("1.50", "1.5"), ("20", "20"), ("-0.0295", "-0.0295")] {
+            assert_eq!(serde_json::to_string(&n(input)).unwrap(), written);
+        }
+    }
+
+    #[cfg(not(feature = "exact-json"))]
+    #[test]
+    fn outside_exact_mode_an_object_is_not_a_number() {
+        if exact_json_active() {
+            return; // another crate in this build turned the mode on
+        }
+        let error = serde_json::from_str::<Number>(r#"{"$serde_json::private::Number":"1"}"#).unwrap_err();
+        assert!(error.to_string().contains("expected a JSON number"), "{error}");
+    }
+
+    #[cfg(feature = "exact-json")]
+    mod exact {
+        use super::*;
+
+        const LONG: &str = "0.0416666666666666666666666667";
+
+        #[test]
+        fn the_mode_is_detected() {
+            assert!(Number::exact_json_active());
+        }
+
+        #[test]
+        fn a_fraction_decodes_directly_and_through_a_value() {
+            // The reported failure: "invalid type: map, expected a JSON number".
+            for text in ["0.25", LONG, "-1.05", "1e-3"] {
+                let direct: Number = serde_json::from_str(text).unwrap();
+                let value: serde_json::Value = serde_json::from_str(text).unwrap();
+                let via_value: Number = serde_json::from_value(value).unwrap();
+                assert_eq!(direct, via_value, "{text}");
+            }
+            assert_eq!(serde_json::from_str::<Number>(LONG).unwrap(), n(LONG));
+        }
+
+        #[test]
+        fn twenty_eight_digits_round_trip_and_are_not_imprecise() {
+            let value = n(LONG);
+            assert_eq!(serde_json::to_string(&value).unwrap(), LONG);
+            assert!(value.json_round_trips());
+            assert!(value.validate().is_ok());
+        }
     }
 
     #[test]

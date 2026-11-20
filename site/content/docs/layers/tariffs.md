@@ -259,7 +259,7 @@ and belongs last
 ```
 
 Every finding is a Tariff that decodes, validates and prices sessions — just not the way it reads.
-The fifteen codes cover:
+The default profile covers:
 
 | Finding | Why it matters |
 |---|---|
@@ -275,6 +275,11 @@ The fifteen codes cover:
 | `price_limits_cross`, `never_active`, `implausible_vat`, `duplicate_dimension`, `flat_step_size`, `nothing_priced_by_use` | Each one a statement the Tariff makes that it cannot mean |
 
 `ocpi lint` exits non-zero, so publishing a tariff can be gated on it.
+
+**Ready for OCPI 3.0?** OCPI 3.0 has no `step_size`, and the specification advises 2.x tariffs to
+*"set `step_size` to 1 always"*. `lint_with(&tariff, LintProfile::Ocpi3Ready)` — `ocpi lint
+--profile ocpi3` — adds `step_size_not_ocpi3_ready` for every one above 1. It is a profile, not a
+default, because the advice is legal to ignore.
 
 It reports one in the specification's **own** `tariff_13` example: a `TIME` `step_size` of 60 on a
 tariff that also prices `PARKING_TIME`. Harmless there — the session charges for exactly 150

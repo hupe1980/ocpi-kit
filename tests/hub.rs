@@ -173,7 +173,7 @@ async fn a_relayed_request_keeps_the_correlation_id_and_gets_a_fresh_request_id(
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].correlation_id, original.correlation_id, "the correlation id is carried through");
     assert_ne!(seen[0].request_id, original.request_id, "the request id is new for this hop");
-    assert!(!seen[0].request_id.is_empty());
+    assert_ne!(seen[0].request_id, "");
     assert_eq!(seen[0].path, "/locations/NL/TNM/LOC1", "the client-owned path is preserved verbatim");
     assert_eq!(seen[0].body, r#"{"id":"LOC1"}"#, "the body is relayed untouched");
 }
@@ -394,7 +394,7 @@ async fn a_suspended_platform_is_not_broadcast_to() {
         StatusCode::CONNECTION_PROBLEM,
         "a broadcast that reached nobody is not a success, whatever the policy says",
     );
-    assert!(party.seen().is_empty());
+    assert_eq!(party.seen(), [] as [Seen; 0]);
 }
 
 #[tokio::test]

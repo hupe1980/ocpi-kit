@@ -115,6 +115,25 @@ pub enum TariffLintCode {
     PriceLimitsCross,
     /// The tariff's validity window is empty or already over.
     NeverActive,
+    /// A `step_size` above 1, which OCPI 3.0 removes. Reported only under
+    /// [`LintProfile::Ocpi3Ready`].
+    ///
+    /// > *"Users of OCPI 2.2.1 looking to be ready for a transition to OCPI 3.0 or to maximize
+    /// > interoperability with OCPI 3.0 are advised to effectively avoid using `step_size` by
+    /// > setting `step_size` to 1 always."*
+    StepSizeNotOcpi3Ready,
+}
+
+/// Which findings [`lint_with`] reports.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum LintProfile {
+    /// Tariffs that do not do what they look like they do. What [`lint`] reports.
+    #[default]
+    Default,
+    /// Everything in `Default`, plus what a CPO preparing for OCPI 3.0 must change:
+    /// [`TariffLintCode::StepSizeNotOcpi3Ready`].
+    Ocpi3Ready,
 }
 
 impl TariffLintCode {
@@ -137,6 +156,7 @@ impl TariffLintCode {
             Self::ImplausibleVat => "implausible_vat",
             Self::PriceLimitsCross => "price_limits_cross",
             Self::NeverActive => "never_active",
+            Self::StepSizeNotOcpi3Ready => "step_size_not_ocpi3_ready",
         }
     }
 }
@@ -164,13 +184,28 @@ impl fmt::Display for TariffLint {
     }
 }
 
-/// Every lint that applies to `tariff`, in document order.
+/// Every lint that applies to `tariff` under [`LintProfile::Default`], in document order.
 ///
 /// Each finding is a Tariff that conforms, decodes and prices sessions — and does not do what
 /// it looks like it does. See [`TariffLintCode`] for what each one means.
 #[must_use]
-#[allow(clippy::too_many_lines)]
 pub fn lint(tariff: &Tariff) -> Vec<TariffLint> {
+    lint_with(tariff, LintProfile::Default)
+}
+
+/// Every lint that applies to `tariff` under `profile`, in document order.
+///
+/// ```
+/// # use ocpi_kit::tariffs::{lint_with, LintProfile, TariffLintCode};
+/// # use ocpi_kit::v2_3_0::tariffs::Tariff;
+/// let tariff: Tariff = serde_json::from_str(include_str!("../../fixtures/2.3.0/tariff_1_simple_2hour.json"))?;
+/// let findings = lint_with(&tariff, LintProfile::Ocpi3Ready);
+/// assert!(findings.iter().all(|f| f.code == TariffLintCode::StepSizeNotOcpi3Ready));
+/// # Ok::<(), serde_json::Error>(())
+/// ```
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn lint_with(tariff: &Tariff, profile: LintProfile) -> Vec<TariffLint> {
     use crate::v2_3_0::tariffs::TaxIncluded;
 
     let mut out: Vec<TariffLint> = Vec::new();
@@ -215,6 +250,21 @@ pub fn lint(tariff: &Tariff) -> Vec<TariffLint> {
                         "element {first} prices {dimension} and its restrictions always match, so \
                          this Price Component can never apply. The unrestricted element is the \
                          fallback and belongs last"
+                    ),
+                });
+            }
+
+            if profile == LintProfile::Ocpi3Ready
+                && dimension != TariffDimensionType::Flat
+                && component.step_size > 1
+            {
+                out.push(TariffLint {
+                    code: TariffLintCode::StepSizeNotOcpi3Ready,
+                    pointer: format!("{at}/step_size"),
+                    message: format!(
+                        "OCPI 3.0 has no step_size; to be ready for it, \"set step_size to 1 always\" \
+                         (this one bills {dimension} in blocks of {})",
+                        component.step_size
                     ),
                 });
             }
@@ -563,6 +613,35 @@ mod tests {
                 .build(),
         ]);
         assert!(codes(&t).contains(&TariffLintCode::NothingPricedByUse));
+    }
+
+    #[test]
+    fn the_ocpi3_profile_lists_every_step_size_to_change_and_nothing_else() {
+        let tariff = |step: u32, kind| {
+            tariff(vec![
+                TariffElement::builder().price_components(vec![component(kind, "1.00", step)]).build(),
+            ])
+        };
+        let ready = |t: &Tariff| {
+            lint_with(t, LintProfile::Ocpi3Ready)
+                .into_iter()
+                .filter(|f| f.code == TariffLintCode::StepSizeNotOcpi3Ready)
+                .collect::<Vec<_>>()
+        };
+        let found = ready(&tariff(300, TariffDimensionType::Time));
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].pointer, "/elements/0/price_components/0/step_size");
+        assert!(found[0].message.contains("set step_size to 1 always"));
+        assert!(
+            !lint(&tariff(300, TariffDimensionType::Time))
+                .iter()
+                .any(|f| f.code == TariffLintCode::StepSizeNotOcpi3Ready)
+        );
+        for (step, kind) in
+            [(1, TariffDimensionType::Time), (0, TariffDimensionType::Energy), (5, TariffDimensionType::Flat)]
+        {
+            assert_eq!(ready(&tariff(step, kind)), vec![], "{step} on {kind}");
+        }
     }
 
     #[test]

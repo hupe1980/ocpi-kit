@@ -60,7 +60,10 @@ jobs:
         with:
           toolchain: ${{ matrix.rust }}
       - uses: Swatinem/rust-cache@v2
+      # `--all-features` includes `exact-json`, so it tests the exact JSON boundary; `full` is
+      # every layer with the float boundary. Both are the boundary a consumer can end up with.
       - run: cargo test --all-features
+      - run: cargo test --features full
       - run: cargo test --no-default-features
       - run: cargo test  # default features
       # The benchmarks are not run in CI — the numbers would be meaningless on a shared runner —

@@ -7,17 +7,14 @@ description = "Places where the OCPI specification contradicts itself, and how o
 Places where the OCPI specification contradicts itself, and what `ocpi-kit` does about each.
 
 Every example below is a test in
-[`tests/fixtures.rs`](https://github.com/hupe1980/ocpi-kit/blob/main/tests/fixtures.rs) carrying its
-reason — `Expect::Erratum` where the example does not round-trip, `Expect::Tolerated` where this
-crate reads it anyway — so if upstream fixes one the test fails and says to promote it.
+[`tests/fixtures.rs`](https://github.com/hupe1980/ocpi-kit/blob/main/tests/fixtures.rs) that
+asserts it still fails, so an upstream fix turns the build red and says to promote it.
 
-Nineteen of the entries **in the text** are re-derived from the specification on each CI run:
-`cargo run -p xtask -- errata` expresses each as a predicate over the pinned sources — text that
-must still be there, or must still be absent — and fails when one stops reproducing. The rest
-record a place where the specification says nothing at all, which no predicate holds in place.
-These claims are public and other people quote them; a documented workaround for a problem that no
-longer exists is worse than no workaround, because it is invisible. See [Spec
-traceability](@/docs/reference/traceability.md).
+Most entries in the text are predicates over the pinned sources (`cargo run -p xtask -- errata`),
+re-checked on every CI run. A weekly job also checks every pinned branch's head and the unmerged
+`2.3.0/hotfix/core-editorial`, so a fix upstream arrives as a named failure, not as silence.
+Entries marked **fixed upstream** are corrected there but not yet in a pinned release; the
+workaround stands until the pin moves. See [Spec traceability](@/docs/reference/traceability.md).
 
 ## In the specification's own examples
 
@@ -26,7 +23,8 @@ traceability](@/docs/reference/traceability.md).
 | `cdr_example.json` (2.3.0) | The Tariff embedded in `tariffs[0]` omits `tax_included`, which 2.3.0 adds as a required field (cardinality 1) of the Tariff object |
 | `location_put_example_add_evse.json` (2.2.1 **and** 2.3.0) | Uses `floor` where the EVSE field is `floor_level`, and gives `floor` and `physical_reference` as JSON numbers where the spec says `string(16)` |
 | `tariff_put_example.json` (2.2.1 and 2.3.0) | A PUT body "must specify all required fields of an object" (§transport_and_format_put), but this one omits `last_updated` |
-| `payment_financial_advice_confirmation_*.json` (3 files) | `total_costs` is written in the OCPI 2.2.1 `Price` shape `{excl_vat, incl_vat}`; 2.3.0 replaced it with `{before_taxes, taxes[]}` |
+| `payment_financial_advice_confirmation_example_failure.json` (payments branch) | Omits `eft_data`, which the object's own table makes required (`+`) |
+| `cdr_example.json` (2.3.0) | `cdr_location.coordinates` has latitude and longitude transposed (3.73 N, 51.05 E for an address in Ghent). **Fixed upstream** |
 | `cdrs_example_of_a_cdr.json` (2.1.1) | The embedded Tariff writes `price` as the JSON *string* `"2.00"` where §types_number_type requires a number. Recorded as `Tolerated`: this crate parses it exactly and emits it unquoted |
 | `location_example.json`, `location_example_parking_garage_opening_hours.json` (bookings branch) | Give `EVSE.parking` as a list of bare id strings, although the branch's *own* property table defines it as `EVSEParking*`, identically to core 2.3.0 |
 | `booking_example.json` (bookings branch) | Every `booking_requests[].booking_request` omits `booking_location_id`, which the BookingRequest table gives cardinality 1; and `party_id` is `INF12` where the table says `CiString(3)` |
@@ -38,9 +36,11 @@ traceability](@/docs/reference/traceability.md).
 | Where | Problem | How `ocpi-kit` handles it |
 |---|---|---|
 | `mod_hub_client_info` (2.2.1 and 2.3.0) | The Sender GET endpoint structure is written as `{locations_endpoint_url}?…` — a copy-paste from Locations | Treated as `{hubclientinfo_endpoint_url}` |
-| `mod_hub_client_info` receiver PUT | The example URL uses version `2.0` and path `clientinfo`, though the module id is `hubclientinfo` | URL builders use the discovered endpoint URL; examples are not normative |
+| `mod_hub_client_info` receiver PUT | The example URL uses path `clientinfo`, though the module id is `hubclientinfo` (and, until the hotfix, version `2.0`) | URL builders use the discovered endpoint URL; examples are not normative |
 | `mod_bookings` | The module identifier is literally `Booking`, where every other id is a lowercase plural; the receiver-interface tables link to `mod_locations` anchors | `ModuleId::Booking` matches `bookings` case-insensitively, as a documented interop accommodation |
-| The `payments` branch `ModuleID` table | Does not list `payments` at all, although the module exists and its endpoints are specified | `ModuleId::Payments` exists and documents the omission |
+| Core's `ModuleID` table | Does not list `invoicereconciliation`, although core defines the module. **Fixed upstream** | `ModuleId::InvoiceReconciliation` is a known module |
+| `transport_and_format`, the `Authorization` examples | Both base64-encode a trailing newline (`…NGQyCg==` is the UUID plus `\n`). A peer that copies one registers a token nobody else will match. **Fixed upstream** | Not accommodated: a token is what it is. The likeliest cause of a first registration failing |
+| `mod_tariffs`, Complex Tariff example | The Saturday breakdown prices 114 minutes at the row's € 1.25/h as € 2.28 (that is € 1.20/h), so both totals are wrong: € 12.28 / € 13.861 instead of € 12.375 / € 13.975. **Fixed upstream** | The engine follows the rules, not the arithmetic; the worked-example test asserts the corrected figures |
 | 2.3.0 `credentials` examples | No example shows `hub_party_id`, although the text mandates it for routing platforms | This crate's fixtures add one, marked non-spec |
 | `types.asciidoc` `string(N)` | Silent on whether `N` counts bytes or characters | This crate counts Unicode scalar values, and is lenient on ingest |
 | `mod_tariffs` | Explicitly states there are no rounding rules, and notes `step_size` is removed in OCPI 3.0 | Both are settings on `PricingPolicy` |
@@ -51,8 +51,6 @@ traceability](@/docs/reference/traceability.md).
 | `mod_cdrs` `step_size`, `TIME` vs `PARKING_TIME` | The normative sentence is unconditional — *"In the cases that `TIME` and `PARKING_TIME` Tariff Elements are both used, `step_size` is only taken into account for the total parking duration"* — but the worked example beneath it justifies the same answer *sequentially*: *"the charging duration is not rounded up, as it is followed by another time based period."* The two part only on a session that parks and then charges | The sentence governs: `PARKING_TIME` absorbs the rounding whenever the session has any |
 | `mod_cdrs` / `mod_sessions`, period ordering | Neither says the Charging Periods must be in chronological order — yet `step_size` is defined in terms of *"the last relevant PriceComponent"*, and a period's duration is only knowable as the gap to the next one | Order and session bounds are validated in all three versions; the engine raises a `PeriodsOutOfOrder` note for an input built by hand rather than read off a CDR |
 | `mod_tariffs`, price limits and tax | The `min_price`/`max_price` rules are stated independently for before and after taxes, and the specification never describes a breakdown, so nothing says what the tax lines should read once a limit has moved a total | A clamp moves the tax lines with the base, in proportion, so they always account for the difference between the two totals. Where an `after_taxes` bound demands tax no rate explains, the line carries `percentage: None` |
-| Payments | `Terminal` PUT/PATCH/GET-one URL structures are only given as "a `terminal_id` URL segment", never as a full pattern, and the examples still show `/2.2.1/` paths | Builders append to the discovered endpoint, the only reading consistent with §transport_and_format_interface_endpoints |
-| Payments, again | The chapter declares one module identifier, `payments`, then addresses its two interfaces through two variables: `{payments_terminals_endpoint_url}` and `{payments_financial_advice_confirmation_endpoint_url}`. **Version discovery cannot express that.** An `Endpoint` is keyed by `identifier` *and* `role`, so one module and one role has exactly one URL; a PTP advertising both would publish two `payments`/`SENDER` endpoints and a client could not tell which was which | The discovered `payments` endpoint is the **base** the two hang off — which is what the spec's own examples show (`…/payments/terminals/`, `…/payments/financial-advice-confirmations/`). `SenderEndpoint::payments_terminals()` also tolerates a peer that advertised a sub-path directly, so both readings interoperate; both are tested |
 | `mod_charging_profiles`, Sender interface | The three objects a result callback can carry are posted to one implementation-defined URL, but `ChargingProfileResult` and `ClearProfileResult` are **byte-identical in shape** — one `result` field each. Nothing in the specification says how a Sender is meant to tell a rejected `PUT` from a rejected `DELETE` | The Sender's freedom over the `response_url` is the mechanism. `OcpiRouter` mounts one path per result kind and `server::CallbackUrls` builds them, so the URL carries the distinction the body cannot |
 | `mod_tariffs`, `TariffRestrictions` | Silent on what `start_time == end_time` means. Read as an empty interval the element never matches; read through the wrap-around rule it always does | **The whole day.** It is what the wrap rule produces with no special case, and it is the reading that fails safe: an element that never matches leaves its dimension with no Price Component, and the specification's answer to that is that the dimension is *free*. A tariff writer who meant "all day" would have silently given the energy away |
 | 2.1.1 `mod_locations`, `EnvironmentalImpact` | The field is `source` in 2.1.1 and `category` from 2.2 onwards, though nothing marks the rename | 2.1.1 gets its own `EnvironmentalImpact` type. Reusing the later one would drop a 2.1.1 peer's value into `extensions` — silently, and only in the field that says how clean the electricity was |
@@ -60,4 +58,3 @@ traceability](@/docs/reference/traceability.md).
 | 2.3.0 `mod_tokens`, the `APP_USER` whitelist | *"The eMSP is RECOMMENDED to push Tokens with type `AD_HOC_USER` or `APP_USER` with `whitelist` set to `NEVER`."* That is a recommendation, not a constraint — and the specification's own `APP_USER` example uses `ALLOWED`, so validating against it would reject the spec's own document | `Validate` does not report it. `Token::follows_whitelist_recommendation()` answers the question for a caller who wants to ask it |
 | The `bookings` branch `Tariff` table | Lacks `preauthorize_amount`, which core 2.3.0 added after the branch forked | Declared in `xtask`'s `BRANCH_ONLY_FIELDS`, so the field census verifies it where it belongs and ignores it where it does not |
 | `mod_cdrs`, `SignedData.url` | Typed `string(512)` — not the `URL` type (`string(255)`) every other URL-shaped field in OCPI uses — and the row's cross-reference points at the **CiString** anchor while the text reads `string`, so the row does not agree with itself about case sensitivity either | Modelled as the `string(512)` the text says, so a conformant link past 255 characters is carried and validated as one. Case-sensitive, following the text rather than the cross-reference |
-| Payments, `POST .../terminals/activate` | *"The terminal_id is optional in the activation request"* — so the body is a `Terminal` that is not a valid `Terminal` | Typed as `Patch<Terminal>`, this crate's type for "an object with fields left out". It is **not** a merge patch: this is a `POST`, and the rule that a `PATCH` must carry `last_updated` deliberately does not apply |

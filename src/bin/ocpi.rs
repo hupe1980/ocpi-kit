@@ -7,6 +7,7 @@
 //! ocpi pull payment-terminals https://… --token …
 //! ocpi price cdr.json --tariff tariff.json --time-zone Europe/Berlin
 //! ocpi lint tariff.json                                 # legal, and still wrong
+//! ocpi lint --profile ocpi3 tariff.json                 # …and what OCPI 3.0 drops
 //! ocpi convert location.json --from 2.2.1 --to 2.3.0   # with a loss report
 //! ocpi schema location --version 2.3.0                  # JSON Schema
 //! ```
@@ -127,6 +128,9 @@ enum Command {
     Lint {
         /// A Tariff, as JSON.
         tariff: PathBuf,
+        /// `ocpi3` adds what a CPO must change to be ready for OCPI 3.0 (every `step_size` above 1).
+        #[arg(long, value_enum, default_value_t = Profile::Default)]
+        profile: Profile,
         /// Print the findings as JSON rather than as lines.
         #[arg(long)]
         json: bool,
@@ -177,6 +181,15 @@ enum Command {
 }
 
 /// The role a `serve-mock` party fills.
+/// Which findings `ocpi lint` reports.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum Profile {
+    /// Tariffs that do not do what they look like they do.
+    Default,
+    /// Also every `step_size` OCPI 3.0 no longer has.
+    Ocpi3,
+}
+
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum MockRole {
     /// A Charge Point Operator: it owns Locations, Sessions, CDRs and Tariffs.
@@ -309,7 +322,7 @@ fn run(cli: Cli) -> Fallible {
         Command::Price { cdr, tariffs, time_zone, no_step_size, json } => {
             price(&cdr, &tariffs, &time_zone, no_step_size, json)
         }
-        Command::Lint { tariff, json } => lint(&tariff, json),
+        Command::Lint { tariff, profile, json } => lint(&tariff, profile, json),
         Command::Convert { file, object, from, to } => convert(&file, object, from, to),
         Command::Schema { object, version } => schema(object, version),
         Command::Versions { url, token, unencoded_token } => {
@@ -462,9 +475,14 @@ fn price(
 }
 
 /// `ocpi lint` — the Tariff mistakes that are legal and still bill the wrong amount.
-fn lint(path: &std::path::Path, as_json: bool) -> Fallible {
+fn lint(path: &std::path::Path, profile: Profile, as_json: bool) -> Fallible {
+    use ocpi_kit::tariffs::LintProfile;
     let tariff: ocpi_kit::v2_3_0::tariffs::Tariff = serde_json::from_str(&read(path)?)?;
-    let findings = ocpi_kit::tariffs::lint(&tariff);
+    let profile = match profile {
+        Profile::Default => LintProfile::Default,
+        Profile::Ocpi3 => LintProfile::Ocpi3Ready,
+    };
+    let findings = ocpi_kit::tariffs::lint_with(&tariff, profile);
 
     if as_json {
         let rendered: Vec<_> = findings

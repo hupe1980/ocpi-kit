@@ -1169,13 +1169,13 @@ mod period_sequence_tests {
 
     #[test]
     fn a_well_formed_sequence_is_accepted() {
-        assert!(
+        assert_eq!(
             check(
                 &["2024-01-15T10:00:00Z", "2024-01-15T10:30:00Z", "2024-01-15T11:00:00Z"],
                 "2024-01-15T10:00:00Z",
                 Some("2024-01-15T11:30:00Z"),
-            )
-            .is_empty()
+            ),
+            []
         );
     }
 
@@ -1213,8 +1213,8 @@ mod period_sequence_tests {
 
     #[test]
     fn an_empty_or_single_period_list_has_nothing_to_disagree_with() {
-        assert!(check(&[], "2024-01-15T10:00:00Z", None).is_empty());
-        assert!(check(&["2024-01-15T10:00:00Z"], "2024-01-15T10:00:00Z", None).is_empty());
+        assert_eq!(check(&[], "2024-01-15T10:00:00Z", None), []);
+        assert_eq!(check(&["2024-01-15T10:00:00Z"], "2024-01-15T10:00:00Z", None), []);
     }
 }
 

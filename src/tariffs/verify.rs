@@ -305,7 +305,8 @@ fn split_time_cost(breakdown: &CostBreakdown) -> (Number, Number) {
     (charging, reserved)
 }
 
-#[cfg(test)]
+// The CDRs under test are built from `testkit`'s samples.
+#[cfg(all(test, feature = "testkit"))]
 mod tests {
     use super::*;
     use crate::tariffs::{PricedPeriod, PricedSession, PricingEngine, TimeZone};

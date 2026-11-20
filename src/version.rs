@@ -176,12 +176,7 @@ ocpi_open_enum! {
         Locations = "locations",
         /// Payment terminals and financial advice confirmations. Sender: PTP.
         ///
-        /// Added to the protocol in OCPI 2.3.0.
-        ///
-        /// **Spec erratum.** The Payments module chapter gives *"Module Identifier: `payments`"*,
-        /// but the module is missing from the `ModuleID` table in
-        /// §version_information_endpoint_moduleid_enum of the same release. The chapter is
-        /// normative for its own identifier, so `payments` is treated as a known module here.
+        /// Added to the protocol in OCPI 2.3.0, on the `payments` release branch.
         Payments = "payments",
         /// Charging sessions. Sender: CPO.
         Sessions = "sessions",

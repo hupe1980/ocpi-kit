@@ -155,14 +155,11 @@ pub fn report(root: &Path, check: bool) -> Result<bool, Failure> {
                     }
                 }
                 // A field validated by hand rather than through the macro: `v.field("x", &…)`.
-                if let Some(rest) = line.split_once("v.field(\"") {
-                    if let Some((name, _)) = rest.1.split_once('"') {
-                        validated.entry(object.clone()).or_default().insert(name.to_owned());
-                    }
-                } else if let Some(rest) = line.split_once("v.enter(\"") {
-                    if let Some((name, _)) = rest.1.split_once('"') {
-                        validated.entry(object.clone()).or_default().insert(name.to_owned());
-                    }
+                let rest = line.split_once("v.field(\"").or_else(|| line.split_once("v.enter(\""));
+                if let Some((_, rest)) = rest
+                    && let Some((name, _)) = rest.split_once('"')
+                {
+                    validated.entry(object.clone()).or_default().insert(name.to_owned());
                 }
             }
             if let Some(name) = current {

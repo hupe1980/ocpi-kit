@@ -593,7 +593,7 @@ impl PricingEngine {
         //
         // A post-tax bound below the pre-tax total asks for negative tax, which no rate can
         // produce. The bound is what the Tariff publishes, so it governs both totals rather than
-        // being discarded — which used to publish a total above the stated maximum.
+        // being discarded, which would publish a total above the stated maximum.
         if total_excl.is_positive() && total_incl < total_excl {
             let capped =
                 tariff.max_price.as_ref().and_then(|p| p.after_taxes).is_some_and(|cap| cap <= total_incl);
@@ -1118,11 +1118,7 @@ fn matches(r: &TariffRestrictions, context: &RestrictionContext) -> bool {
         return false;
     }
 
-    if !r.day_of_week.is_empty() && !r.day_of_week.contains(&context.weekday) {
-        return false;
-    }
-
-    true
+    r.day_of_week.is_empty() || r.day_of_week.contains(&context.weekday)
 }
 
 fn i64_of(value: u64) -> i64 {

@@ -26,10 +26,26 @@ pricing engine. The single documented exception is the JSON boundary itself.
 
 ## The JSON boundary
 
-The specification requires these values to be JSON *numbers*, not strings. `serde_json` represents
-a fractional JSON number as an `f64` unless its `arbitrary_precision` feature is on — and that
-feature changes `serde_json::Value` globally for every crate in the build, so `ocpi-kit` does not
-impose it on you. The boundary therefore behaves like this:
+The specification requires these values to be JSON *numbers*, not strings. How exact the boundary
+is depends on one build-wide switch: `serde_json`'s `arbitrary_precision` feature.
+
+### Exact mode — one line in your manifest
+
+```toml
+ocpi-kit = { version = "0.5", features = ["exact-json"] }
+```
+
+Every number is read from its literal and written as one, with no binary float in either
+direction: `0.0416666666666666666666666667` arrives with all 28 digits and leaves with them.
+`Number::exact_json_active()` tells you whether the mode is on.
+
+It is opt-in because it is **build-wide**: it changes `serde_json::Value` for every crate in your
+build, and Cargo unifies features, so any dependency can switch it on for you. `ocpi-kit` works
+either way — numbers decode the same whichever crate turned the mode on, and whoever did. Output
+is identical in both modes for every value a float can carry; only longer values are written in
+the exact form.
+
+### Float mode — the default
 
 * **Integral values** pass through exactly, as JSON integers. `20` stays `20`, never `20.0`.
 * **Fractional values with up to 15 significant digits** pass through exactly, because the shortest
@@ -46,6 +62,11 @@ assert_eq!(serde_json::to_string(&price)?, "0.25");   // trailing zeros are not 
 let vat: Number = serde_json::from_str("20")?;
 assert_eq!(serde_json::to_string(&vat)?, "20");       // an integer stays an integer
 ```
+
+In both modes input is normalised (`5.00` decodes to `5`, as the float path would), so the same
+JSON gives the same `Number`. A literal with more significant digits than a decimal holds (28) is
+rounded to 28 rather than refused; a magnitude beyond the decimal range is refused, quoting a
+bounded prefix of the literal.
 
 A peer that sends a number as a JSON *string* (`"0.25"`) is tolerated on input and parsed exactly;
 output is always a JSON number.

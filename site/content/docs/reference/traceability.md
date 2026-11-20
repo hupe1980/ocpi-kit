@@ -185,18 +185,15 @@ and checks two things: that the pattern is still in that chapter character for c
 expanding it with canned values gives exactly what the crate's builder produces. One half is
 anchored in the specification, the other in the code.
 
-It is also where this crate's reading of the Payments endpoint erratum is written down: the case
-states, in a field a reviewer can disagree with, that `{payments_terminals_endpoint_url}` is the
-discovered `payments` endpoint plus `/terminals`.
-
 ### `errata`
 
 ```console
 $ cargo run -p xtask -- errata
 [ok] E13 the TIME/PARKING_TIME `step_size` sentence and its own worked example justify the same
-        answer differently — still in ocpi-2.3.0/mod_cdrs.asciidoc
+        answer differently — still in ocpi-2.3.0/mod_cdrs.asciidoc (open)
 …
-19 erratum/errata re-derived from the specification; every one is still real
+22 erratum/errata re-derived from the specification; every one is where it is recorded
+$ cargo run -p xtask -- errata --upstream   # also each branch head and watched hotfix branch
 ```
 
 The crate is *shaped* around several entries on the [spec errata

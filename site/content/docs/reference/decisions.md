@@ -224,8 +224,8 @@ than the one that started it.
 not merely assigned**. Both are explained under
 [Spec traceability](@/docs/reference/traceability.md).
 
-**The specification is not vendored.** OCPI is CC BY-ND 4.0, so `specs/` is a gitignored local
-checkout. The fixtures extracted from it *are* committed, so the round-trip suite runs everywhere.
+**The specification is not vendored.** OCPI is CC BY-ND 4.0, so the specification is a gitignored local
+checkout of pinned commits (`$OCPI_REFERENCE` overrides where it lives). The fixtures extracted from it *are* committed, so the round-trip suite runs everywhere.
 
 **MSRV is a fixed pin per minor release.** A floating "latest stable minus two" lets a patch release
 break a consumer's build.

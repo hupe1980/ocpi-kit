@@ -521,3 +521,143 @@ async fn a_write_is_never_retried() {
     assert!(result.is_err(), "the 503 surfaces");
     // `expect(1)` on the mock asserts the single attempt when the server is dropped.
 }
+
+// ---------------------------------------------------------------------------------------------
+// Redirects: the URL policy holds on every hop
+// ---------------------------------------------------------------------------------------------
+
+fn versions_list(server: &MockServer) -> serde_json::Value {
+    let versions = vec![Version::new(VersionNumber::V2_3_0, base(server).join("2.3.0"))];
+    envelope(serde_json::to_value(&versions).expect("serialises"))
+}
+
+async fn discover(c: &OcpiClient, server: &MockServer) -> Result<(), OcpiError> {
+    Registration::new(base(server).join("versions"), test_token("a"))
+        .discover(c.transport())
+        .await
+        .map(|_| ())
+}
+
+#[tokio::test]
+async fn a_redirect_to_another_origin_is_refused_and_never_reaches_the_target() {
+    let peer = MockServer::start().await;
+    let internal = MockServer::start().await; // another port: another origin, like 169.254.169.254
+    Mock::given(method("GET"))
+        .and(path("/versions"))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("location", format!("{}/latest/meta-data/?x=secret", internal.uri())),
+        )
+        .mount(&peer)
+        .await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&internal)
+        .await;
+
+    let error = discover(&client(), &peer).await.expect_err("refused");
+    let OcpiError::UrlRefused { url, reason } = &error else { panic!("expected UrlRefused, got {error:?}") };
+    assert!(reason.contains("leaves the origin"), "{reason}");
+    assert!(url.ends_with("/latest/meta-data/") && !url.contains("secret"), "{url}");
+    assert!(!error.is_transient(), "a refusal is not retried");
+}
+
+#[tokio::test]
+async fn a_trailing_slash_redirect_within_the_origin_is_followed() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/versions"))
+        .respond_with(ResponseTemplate::new(301).insert_header("location", "/versions/"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/versions/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(versions_list(&server)))
+        .mount(&server)
+        .await;
+    let details = VersionDetails::new(VersionNumber::V2_3_0, vec![]);
+    Mock::given(method("GET"))
+        .and(path("/2.3.0"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(envelope(serde_json::to_value(&details).unwrap())),
+        )
+        .mount(&server)
+        .await;
+
+    discover(&client(), &server).await.expect("followed within the origin");
+}
+
+#[tokio::test]
+async fn a_redirect_loop_is_cut_off() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/versions"))
+        .respond_with(ResponseTemplate::new(302).insert_header("location", "/elsewhere"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/elsewhere"))
+        .respond_with(ResponseTemplate::new(302).insert_header("location", "/versions"))
+        .mount(&server)
+        .await;
+
+    let error = discover(&client(), &server).await.expect_err("refused");
+    assert!(
+        matches!(&error, OcpiError::UrlRefused { reason, .. } if reason.contains("more than 5")),
+        "{error:?}"
+    );
+    assert_eq!(server.received_requests().await.unwrap().len(), 6, "the first request and five hops");
+}
+
+#[tokio::test]
+async fn a_redirected_write_is_not_followed() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/locations/NL/TNM/LOC1"))
+        .respond_with(ResponseTemplate::new(307).insert_header("location", "/other/LOC1"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(path("/other/LOC1")).respond_with(ResponseTemplate::new(200)).expect(0).mount(&server).await;
+
+    let peer = Peer::builder(VersionNumber::V2_3_0, test_token("c"))
+        .versions_url(base(&server).join("versions"))
+        .endpoint(ModuleId::Locations, InterfaceRole::Receiver, base(&server).join("locations"))
+        .party(test_msp())
+        .build();
+    let location = sample::location("LOC1").expect("valid sample");
+    let error = client()
+        .peer(&peer, test_msp())
+        .locations_receiver()
+        .put_location(&test_cpo(), &location)
+        .await
+        .expect_err("refused");
+    assert!(
+        matches!(&error, OcpiError::UrlRefused { reason, .. } if reason.contains("never redirected")),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_hand_built_client_that_follows_redirects_itself_is_caught() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/versions"))
+        .respond_with(ResponseTemplate::new(302).insert_header("location", "/versions/"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/versions/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(versions_list(&server)))
+        .mount(&server)
+        .await;
+
+    // reqwest's default follows up to ten redirects, to anywhere.
+    let c = OcpiClient::from_http(reqwest::Client::new(), ClientConfig::for_testing());
+    let error = discover(&c, &server).await.expect_err("refused");
+    assert!(
+        matches!(&error, OcpiError::UrlRefused { reason, .. } if reason.contains("followed a redirect itself")),
+        "{error:?}"
+    );
+}

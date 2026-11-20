@@ -33,7 +33,7 @@ const BASE: &str = "https://example.com/ocpi/2.3.0/x";
 
 /// One documented URL structure, and the builder that is supposed to produce it.
 struct Case {
-    /// Directory under `specs/src/`.
+    /// Directory under the spec checkout ([`crate::spec_dir`]).
     release: &'static str,
     /// The chapter the structure appears in.
     file: &'static str,
@@ -42,16 +42,6 @@ struct Case {
     /// The values to expand it with. A bracketed group survives only when every `{placeholder}`
     /// inside it has a value here.
     params: &'static [(&'static str, &'static str)],
-    /// What the specification's endpoint variable resolves to, relative to the discovered
-    /// endpoint this crate starts from.
-    ///
-    /// Empty for every module whose one endpoint *is* the discovered one. Payments is the
-    /// exception, and the reason this field exists: the chapter declares one module identifier and
-    /// then addresses two interfaces through `{payments_terminals_endpoint_url}` and
-    /// `{payments_financial_advice_confirmation_endpoint_url}`, which version discovery cannot
-    /// express. Writing the sub-path here states this crate's reading — the discovered `payments`
-    /// endpoint is the base those two hang off — where a reviewer can disagree with it.
-    endpoint_suffix: &'static str,
     /// What this crate builds for those values.
     built: fn(&Url) -> Url,
 }
@@ -72,7 +62,6 @@ const CASES: &[Case] = &[
         file: "mod_locations.asciidoc",
         pattern: "{locations_endpoint_url}?[date_from={date_from}]&amp;[date_to={date_to}]&amp;[offset={offset}]&amp;[limit={limit}]",
         params: &[("offset", "50"), ("limit", "10")],
-        endpoint_suffix: "",
         built: |base| {
             SenderEndpoint::new(base.clone()).list(&PageQuery::new().with_offset(50).with_limit(10))
         },
@@ -82,7 +71,6 @@ const CASES: &[Case] = &[
         file: "mod_locations.asciidoc",
         pattern: "{locations_endpoint_url}/{location_id}[/{evse_uid}][/{connector_id}]",
         params: &[("location_id", "LOC1"), ("evse_uid", "3256"), ("connector_id", "1")],
-        endpoint_suffix: "",
         built: |base| SenderEndpoint::new(base.clone()).location("LOC1", Some("3256"), Some("1")),
     },
     Case {
@@ -90,7 +78,6 @@ const CASES: &[Case] = &[
         file: "mod_locations.asciidoc",
         pattern: "{locations_endpoint_url}/{location_id}[/{evse_uid}][/{connector_id}]",
         params: &[("location_id", "LOC1")],
-        endpoint_suffix: "",
         built: |base| SenderEndpoint::new(base.clone()).location("LOC1", None, None),
     },
     Case {
@@ -98,7 +85,6 @@ const CASES: &[Case] = &[
         file: "mod_locations.asciidoc",
         pattern: "{locations_endpoint_url}/{country_code}/{party_id}/{location_id}[/{evse_uid}][/{connector_id}]",
         params: &[("country_code", "NL"), ("party_id", "TNM"), ("location_id", "LOC1"), ("evse_uid", "3256")],
-        endpoint_suffix: "",
         built: |base| ReceiverEndpoint::new(base.clone()).location(&party(), "LOC1", Some("3256"), None),
     },
     // --- Sessions ----------------------------------------------------------------------------
@@ -107,7 +93,6 @@ const CASES: &[Case] = &[
         file: "mod_sessions.asciidoc",
         pattern: "{sessions_endpoint_url}/{session_id}/charging_preferences",
         params: &[("session_id", "101")],
-        endpoint_suffix: "",
         built: |base| SenderEndpoint::new(base.clone()).charging_preferences("101"),
     },
     Case {
@@ -115,7 +100,6 @@ const CASES: &[Case] = &[
         file: "mod_sessions.asciidoc",
         pattern: "{sessions_endpoint_url}/{country_code}/{party_id}/{session_id}",
         params: &[("country_code", "NL"), ("party_id", "TNM"), ("session_id", "101")],
-        endpoint_suffix: "",
         built: |base| ReceiverEndpoint::new(base.clone()).object(&party(), "101"),
     },
     // --- CDRs --------------------------------------------------------------------------------
@@ -124,7 +108,6 @@ const CASES: &[Case] = &[
         file: "mod_cdrs.asciidoc",
         pattern: "{cdr_endpoint_url}?[date_from={date_from}]&amp;[date_to={date_to}]&amp;[offset={offset}]&amp;[limit={limit}]",
         params: &[("offset", "0"), ("limit", "100")],
-        endpoint_suffix: "",
         built: |base| {
             SenderEndpoint::new(base.clone()).list(&PageQuery::new().with_offset(0).with_limit(100))
         },
@@ -135,7 +118,6 @@ const CASES: &[Case] = &[
         file: "mod_tariffs.asciidoc",
         pattern: "{tariffs_endpoint_url}/{country_code}/{party_id}/{tariff_id}",
         params: &[("country_code", "NL"), ("party_id", "TNM"), ("tariff_id", "12")],
-        endpoint_suffix: "",
         built: |base| ReceiverEndpoint::new(base.clone()).object(&party(), "12"),
     },
     // --- Tokens ------------------------------------------------------------------------------
@@ -144,7 +126,6 @@ const CASES: &[Case] = &[
         file: "mod_tokens.asciidoc",
         pattern: "{token_endpoint_url}/{country_code}/{party_id}/{token_uid}[?type={type}]",
         params: &[("country_code", "NL"), ("party_id", "TNM"), ("token_uid", "012345678"), ("type", "RFID")],
-        endpoint_suffix: "",
         built: |base| ReceiverEndpoint::new(base.clone()).token(&party(), "012345678", Some("RFID")),
     },
     Case {
@@ -153,7 +134,6 @@ const CASES: &[Case] = &[
         // Written with no separator between the endpoint URL and the id — see the report.
         pattern: "{tokens_endpoint_url}{token_uid}/authorize[?type={type}]",
         params: &[("token_uid", "012345678")],
-        endpoint_suffix: "",
         built: |base| SenderEndpoint::new(base.clone()).token_authorize("012345678", None),
     },
     // --- Commands ----------------------------------------------------------------------------
@@ -162,7 +142,6 @@ const CASES: &[Case] = &[
         file: "mod_commands.asciidoc",
         pattern: "{commands_endpoint_url}{command}",
         params: &[("command", "START_SESSION")],
-        endpoint_suffix: "",
         built: |base| SenderEndpoint::new(base.clone()).command("START_SESSION"),
     },
     // --- Charging Profiles -------------------------------------------------------------------
@@ -171,37 +150,32 @@ const CASES: &[Case] = &[
         file: "mod_charging_profiles.asciidoc",
         pattern: "{chargingprofiles_endpoint_url}{session_id}",
         params: &[("session_id", "101")],
-        endpoint_suffix: "",
         built: |base| ReceiverEndpoint::new(base.clone()).charging_profile("101"),
     },
     // --- Payments ------------------------------------------------------------------------------
     //
-    // The Payments chapter declares one module identifier and then addresses its two interfaces
-    // through two endpoint URL variables, which version discovery cannot express (see the
-    // errata). These cases are what pins this crate's reading of that: the discovered `payments`
-    // endpoint is the base, and `terminals` and `financial-advice-confirmations` hang off it.
+    // Both collections are fixed sub-paths of the one discovered `payments` endpoint — normative
+    // since the payments branch's 2026 correction, and this crate's reading before it. Every case
+    // builds from the discovered base, so the derivation itself is what is compared.
     Case {
         release: "ocpi-2.3.0-payments",
         file: "mod_payments.asciidoc",
-        pattern: "{payments_terminals_endpoint_url}/{terminal_id}/deactivate",
+        pattern: "{payments_endpoint_url}/terminals/{terminal_id}/deactivate",
         params: &[("terminal_id", "TERM-042")],
-        endpoint_suffix: "/terminals",
-        built: |base| SenderEndpoint::new(base.join("terminals")).terminal_deactivate("TERM-042"),
+        built: |base| SenderEndpoint::new(base.clone()).payments_terminals().terminal_deactivate("TERM-042"),
     },
     Case {
         release: "ocpi-2.3.0-payments",
         file: "mod_payments.asciidoc",
-        pattern: "{payments_terminals_endpoint_url}/activate",
+        pattern: "{payments_endpoint_url}/terminals/activate",
         params: &[],
-        endpoint_suffix: "/terminals",
-        built: |base| SenderEndpoint::new(base.join("terminals")).terminal_activate(),
+        built: |base| SenderEndpoint::new(base.clone()).payments_terminals().terminal_activate(),
     },
     Case {
         release: "ocpi-2.3.0-payments",
         file: "mod_payments.asciidoc",
-        pattern: "{payments_terminals_endpoint_url}?[date_from={date_from}]&amp;[date_to={date_to}]&amp;[offset={offset}]&amp;[limit={limit}]",
+        pattern: "{payments_endpoint_url}/terminals?[date_from={date_from}]&amp;[date_to={date_to}]&amp;[offset={offset}]&amp;[limit={limit}]",
         params: &[("limit", "25")],
-        endpoint_suffix: "/terminals",
         built: |base| {
             SenderEndpoint::new(base.clone()).payments_terminals().list(&PageQuery::new().with_limit(25))
         },
@@ -209,9 +183,8 @@ const CASES: &[Case] = &[
     Case {
         release: "ocpi-2.3.0-payments",
         file: "mod_payments.asciidoc",
-        pattern: "{payments_financial_advice_confirmation_endpoint_url}?[date_from={date_from}]&amp;[date_to={date_to}]&amp;[offset={offset}]&amp;[limit={limit}]",
+        pattern: "{payments_endpoint_url}/financial-advice-confirmations?[date_from={date_from}]&amp;[date_to={date_to}]&amp;[offset={offset}]&amp;[limit={limit}]",
         params: &[("limit", "25")],
-        endpoint_suffix: "/financial-advice-confirmations",
         built: |base| {
             SenderEndpoint::new(base.clone())
                 .payments_financial_advice_confirmations()
@@ -226,7 +199,7 @@ const CASES: &[Case] = &[
 ///
 /// Fails when the specification is not vendored or a chapter cannot be read.
 pub fn report(root: &Path, check: bool) -> Result<bool, Failure> {
-    let specs = root.join("specs/src");
+    let specs = crate::spec_dir(root);
     if !specs.is_dir() {
         return Err(format!(
             "{} does not exist; run `cargo run -p xtask -- spec-sync --fetch` first",
@@ -251,7 +224,7 @@ pub fn report(root: &Path, check: bool) -> Result<bool, Failure> {
         }
 
         // Half two: the builder produces what the structure describes.
-        let expected = expand(case.pattern, case.params, &format!("{BASE}{}", case.endpoint_suffix));
+        let expected = expand(case.pattern, case.params, BASE);
         let actual = (case.built)(&base);
         if actual.as_str() == expected {
             checked += 1;

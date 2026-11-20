@@ -12,8 +12,8 @@
 //! cargo run -p xtask -- dead-config       # every setting does something
 //! ```
 //!
-//! Every task but `no-floats` and `dead-config` reads the vendored specification under
-//! `specs/`, which is not shipped with the crate.
+//! Every task but `no-floats` and `dead-config` reads the specification checkout at
+//! [`spec_dir`], which is git-ignored and not shipped with the crate.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -44,7 +44,11 @@ fn main() -> ExitCode {
         Some("validate-coverage") => {
             validate_coverage::report(&root, std::env::args().any(|a| a == "--check"))
         }
-        Some("errata") => errata::report(&root, std::env::args().any(|a| a == "--check")),
+        Some("errata") => errata::report(
+            &root,
+            std::env::args().any(|a| a == "--check"),
+            std::env::args().any(|a| a == "--upstream"),
+        ),
         Some("no-floats") => floats::check(&root),
         Some("dead-config") => dead_config::check(&root),
         Some("spec-sync") => spec_sync::run(&root, spec_sync::Mode::from_args(std::env::args())),
@@ -71,6 +75,16 @@ fn main() -> ExitCode {
 
 /// Anything a task can fail with.
 pub type Failure = Box<dyn std::error::Error>;
+
+/// Where the pinned OCPI checkouts live: `$OCPI_REFERENCE/src` when the variable is set, else
+/// the git-ignored `concepts/reference/src/` of this checkout. One directory per release named
+/// in `spec-sources.toml`.
+pub(crate) fn spec_dir(root: &Path) -> PathBuf {
+    std::env::var_os("OCPI_REFERENCE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("concepts/reference"))
+        .join("src")
+}
 
 /// The repository root, which is the parent of this crate's manifest directory.
 fn repo_root() -> PathBuf {

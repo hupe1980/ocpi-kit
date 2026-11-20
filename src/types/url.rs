@@ -311,19 +311,19 @@ impl std::error::Error for InvalidUrl {}
 /// it has registered with. The specification says nothing about this, so this crate ships a
 /// default that says no to the things a CPO never legitimately needs to call.
 ///
-/// # What this does not do
+/// # Where it is enforced
 ///
-/// A `UrlPolicy` inspects the URL, and only the URL. It cannot see where a **host name**
-/// resolves, so `https://ptp.example.com/cb` passes even when that name has an `A` record for
-/// `169.254.169.254`, and a name that resolves differently between the check and the connection
-/// defeats it outright (a DNS rebind). Closing that needs a resolver in the connection path,
-/// which belongs to whatever HTTP client is doing the fetching rather than to a URL type.
+/// [`check`](Self::check) inspects the URL text: scheme, IP literals, `localhost`-style names, the
+/// host allow-list. It cannot see where a **host name** resolves. The `client` feature closes
+/// that: its HTTP client re-checks every redirect hop and, through a resolver in the connection
+/// path, refuses every resolved address [`permits_address`](Self::permits_address) rejects — so a
+/// name with a private `A` record, or one that changes its answer between a check and the
+/// connection (DNS rebinding), is refused at connect time. Code that fetches peer URLs with
+/// another HTTP client gets only the first layer; there, pair it with
+/// [`with_allowed_hosts`](Self::with_allowed_hosts) and an egress policy on the network.
 ///
-/// So treat this as the first of two layers, not as the whole defence. In production, pair it
-/// with [`with_allowed_hosts`](Self::with_allowed_hosts) — an explicit list per peer is not
-/// subject to either problem — and with an egress policy on the network that refuses the link-
-/// local and private ranges outright. The literal-IP rules below are what stops the careless
-/// cases; the allow-list is what stops the deliberate ones.
+/// "Private network" here means every address the IANA special-purpose registries mark as not
+/// globally reachable, plus multicast.
 ///
 /// ```
 /// use ocpi_kit::types::{Url, UrlPolicy};
@@ -338,7 +338,8 @@ impl std::error::Error for InvalidUrl {}
 pub struct UrlPolicy {
     /// Schemes that may be used. Defaults to `https` only.
     pub allowed_schemes: Vec<String>,
-    /// Whether loopback, link-local, private and unspecified addresses may be targeted.
+    /// Whether addresses that are not globally reachable — loopback, private, link-local, and every
+    /// other IANA special-purpose range — may be targeted, by IP literal or by resolution.
     ///
     /// Defaults to `false`. Set to `true` for local development and integration tests.
     pub allow_private_networks: bool,
@@ -396,6 +397,28 @@ impl UrlPolicy {
         self
     }
 
+    /// Whether this policy lets the client connect to `ip`.
+    ///
+    /// The rule the client applies to every address a host name resolves to, at connect time —
+    /// exposed so a caller that has to judge an address itself uses the same one. Without
+    /// [`allow_private_networks`](Self::allow_private_networks) only globally reachable unicast
+    /// addresses are permitted: every range the IANA special-purpose registries mark otherwise is
+    /// refused, and IPv4 spelled inside IPv6 is judged as the IPv4 address it is.
+    ///
+    /// ```
+    /// use ocpi_kit::types::UrlPolicy;
+    ///
+    /// let policy = UrlPolicy::default();
+    /// assert!(policy.permits_address("203.0.114.7".parse().unwrap()));
+    /// assert!(!policy.permits_address("169.254.169.254".parse().unwrap()));   // cloud metadata
+    /// assert!(!policy.permits_address("::ffff:10.0.0.1".parse().unwrap()));   // 10/8, mapped
+    /// assert!(UrlPolicy::permissive().permits_address("127.0.0.1".parse().unwrap()));
+    /// ```
+    #[must_use]
+    pub fn permits_address(&self, ip: std::net::IpAddr) -> bool {
+        self.allow_private_networks || !is_private_ip(&ip)
+    }
+
     /// Checks `url` against this policy.
     ///
     /// # Errors
@@ -446,34 +469,55 @@ fn is_private_host(host: &url::Host<&str>) -> bool {
     }
 }
 
+/// Whether `ip` is **not** globally reachable: every range the IANA IPv4 and IPv6 Special-Purpose
+/// Address Registries mark as not globally reachable (RFC 6890 and its updates), plus multicast.
+///
+/// IPv4 carried inside IPv6 — mapped `::ffff:a.b.c.d`, the deprecated compatible `::a.b.c.d`, and
+/// NAT64 `64:ff9b::/96` — is unwrapped and judged as the IPv4 address it is. The transition
+/// mechanisms that tunnel to an address the client cannot see (6to4 `2002::/16`, Teredo inside
+/// `2001::/23`) are refused outright: nobody serves OCPI over them, and a peer that offers one is
+/// more likely to be smuggling a private address than to be misconfigured.
 fn is_private_ip(ip: &std::net::IpAddr) -> bool {
     use std::net::IpAddr;
     match ip {
         IpAddr::V4(v4) => {
-            v4.is_private()
-                || v4.is_loopback()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-                || v4.is_documentation()
-                // 100.64.0.0/10, carrier-grade NAT.
-                || (v4.octets()[0] == 100 && (64..128).contains(&v4.octets()[1]))
+            let [a, b, c, _] = v4.octets();
+            a == 0                                        // 0.0.0.0/8 "this network"
+                || a == 10                                // 10/8 private
+                || a == 100 && (64..128).contains(&b)     // 100.64/10 carrier-grade NAT
+                || a == 127                               // loopback
+                || a == 169 && b == 254                   // link-local, cloud metadata
+                || a == 172 && (16..32).contains(&b)      // 172.16/12 private
+                || a == 192 && b == 0 && c == 0           // 192.0.0/24 IETF protocol assignments
+                || a == 192 && b == 0 && c == 2           // TEST-NET-1
+                || a == 192 && b == 88 && c == 99         // 6to4 relay anycast (deprecated)
+                || a == 192 && b == 168                   // 192.168/16 private
+                || a == 198 && (b == 18 || b == 19)       // 198.18/15 benchmarking
+                || a == 198 && b == 51 && c == 100        // TEST-NET-2
+                || a == 203 && b == 0 && c == 113         // TEST-NET-3
+                || a >= 224 // multicast, reserved, broadcast
         }
         IpAddr::V6(v6) => {
-            v6.is_loopback()
-                || v6.is_unspecified()
-                // Unique local addresses fc00::/7 and link-local fe80::/10.
-                || (v6.segments()[0] & 0xfe00) == 0xfc00
-                || (v6.segments()[0] & 0xffc0) == 0xfe80
-                || v6.to_ipv4_mapped().is_some_and(|v4| is_private_ip(&IpAddr::V4(v4)))
-                // The deprecated IPv4-compatible form `::a.b.c.d`, which `to_ipv4_mapped` does
-                // not cover, and the NAT64 well-known prefix 64:ff9b::/96 — both are ways of
-                // spelling an IPv4 address that a naive check would wave through.
-                || v6.segments()[..6] == [0, 0, 0, 0, 0, 0]
-                    && v6.segments()[6] != 0
-                    && is_private_ip(&IpAddr::V4(embedded_v4(v6)))
-                || v6.segments()[..4] == [0x0064, 0xff9b, 0, 0]
-                    && is_private_ip(&IpAddr::V4(embedded_v4(v6)))
+            let seg = v6.segments();
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_private_ip(&IpAddr::V4(v4));
+            }
+            // `::a.b.c.d` (deprecated IPv4-compatible) and NAT64 64:ff9b::/96 spell an IPv4
+            // address; judge that address. `::` and `::1` fall in the first form and are caught
+            // there (0.0.0.0/8), as is every other address in ::/96.
+            if seg[..6] == [0; 6] || seg[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+                return is_private_ip(&IpAddr::V4(embedded_v4(v6)));
+            }
+            seg[0] == 0x64 && seg[1] == 0xff9b && seg[2] == 1       // 64:ff9b:1::/48 local NAT64
+                || seg[..4] == [0x100, 0, 0, 0]                     // 100::/64 discard-only
+                || seg[0] == 0x2001 && seg[1] < 0x200               // 2001::/23 IETF, incl. Teredo
+                || seg[0] == 0x2001 && seg[1] == 0xdb8              // 2001:db8::/32 documentation
+                || seg[0] == 0x2002                                 // 6to4
+                || seg[0] & 0xfff0 == 0x3ff0                        // 3fff::/20 documentation
+                || seg[0] == 0x5f00                                 // 5f00::/16 SRv6 SIDs
+                || seg[0] & 0xfe00 == 0xfc00                        // fc00::/7 unique local
+                || seg[0] & 0xffc0 == 0xfe80                        // fe80::/10 link-local
+                || seg[0] & 0xff00 == 0xff00 // ff00::/8 multicast
         }
     }
 }
@@ -571,12 +615,78 @@ mod tests {
 
     #[test]
     fn a_host_name_is_not_resolved_so_the_allow_list_is_the_real_defence() {
-        // Documented limitation, asserted so it cannot regress into a false sense of safety:
-        // the policy sees the URL, not where the name points.
+        // `check` sees the URL, not where the name points; the client's resolver judges the
+        // address at connect time (`client::GuardedResolver`). Asserted so the split stays visible.
         let p = UrlPolicy::default();
         assert!(p.check(&Url::new("https://metadata.example.com/latest").unwrap()).is_ok());
         let strict = p.with_allowed_hosts(["ptp.example.com"]);
         assert!(strict.check(&Url::new("https://metadata.example.com/latest").unwrap()).is_err());
+    }
+
+    #[test]
+    fn every_special_purpose_range_is_refused_and_public_addresses_are_not() {
+        let policy = UrlPolicy::default();
+        // One address per range of the IANA special-purpose registries that is not globally
+        // reachable, plus the IPv6 spellings of private IPv4 that naive filters wave through.
+        let refused = [
+            "0.1.2.3",
+            "10.0.0.1",
+            "100.64.0.1",
+            "127.0.0.1",
+            "169.254.169.254",
+            "172.31.255.255",
+            "192.0.0.8",
+            "192.0.2.1",
+            "192.88.99.1",
+            "192.168.1.1",
+            "198.18.0.1",
+            "198.19.255.1",
+            "198.51.100.1",
+            "203.0.113.1",
+            "224.0.0.1",
+            "239.255.255.250",
+            "240.0.0.1",
+            "255.255.255.255",
+            "::",
+            "::1",
+            "::ffff:127.0.0.1",
+            "::ffff:10.0.0.1",
+            "::10.0.0.1",
+            "64:ff9b::a9fe:a9fe",
+            "64:ff9b:1::a00:1",
+            "100::1",
+            "2001::1",
+            "2001:0:4136:e378::1",
+            "2001:db8::1",
+            "2002:c0a8:101::1",
+            "3fff::1",
+            "5f00::1",
+            "fc00::1",
+            "fd12:3456::1",
+            "fe80::1",
+            "ff02::1",
+        ];
+        for ip in refused {
+            assert!(!policy.permits_address(ip.parse().unwrap()), "{ip} must be refused");
+        }
+        let public = [
+            "8.8.8.8",
+            "1.1.1.1",
+            "203.0.114.7",
+            "100.128.0.1",
+            "172.32.0.1",
+            "198.20.0.1",
+            "223.255.255.255",
+            "2606:4700::1111",
+            "2a00:1450:4001::1",
+            "64:ff9b::808:808",
+            "::ffff:8.8.8.8",
+            "2001:4860:4860::8888",
+        ];
+        for ip in public {
+            assert!(policy.permits_address(ip.parse().unwrap()), "{ip} is public");
+        }
+        assert!(UrlPolicy::permissive().permits_address("10.0.0.1".parse().unwrap()));
     }
 
     #[test]

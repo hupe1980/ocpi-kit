@@ -12,7 +12,7 @@ use crate::transport::{
 };
 use crate::types::{Url, UrlPolicy, Validate};
 
-use super::{ClientConfig, RetryPolicy};
+use super::{ClientConfig, RetryPolicy, egress};
 
 /// One outgoing OCPI request, before it is sent.
 #[derive(Debug)]
@@ -236,16 +236,42 @@ impl Transport {
         quirks: &Quirks,
         span: tracing::Span,
     ) -> Result<(OcpiResponse<T>, HeaderMap), OcpiError> {
-        let mut builder = self
-            .http
-            .request(request.method.clone(), request.url.as_str())
-            .timeout(self.config.timeout)
-            .headers(request.header_map(token, quirks));
-        if let Some(body) = &request.body {
-            builder = builder.body(body.clone());
-        }
-
-        let response = builder.send().await.map_err(transport_error)?;
+        // Redirects are followed here rather than by the HTTP client, because only here are the
+        // method and the URL policy known: a GET may follow a same-origin redirect the policy
+        // accepts; nothing else is followed (see `egress`).
+        let mut url = request.url.parse().map_err(|e| OcpiError::UrlRefused {
+            url: request.url.as_str().to_owned(),
+            reason: e.to_string(),
+        })?;
+        let mut hops = 0;
+        let response = loop {
+            let mut builder = self
+                .http
+                .request(request.method.clone(), url.as_str())
+                .timeout(self.config.timeout)
+                .headers(request.header_map(token, quirks));
+            if let Some(body) = &request.body {
+                builder = builder.body(body.clone());
+            }
+            let response = builder.send().await.map_err(transport_error)?;
+            if response.url() != &url {
+                // A hand-built HTTP client followed a redirect on its own, past every check.
+                return Err(OcpiError::UrlRefused {
+                    url: egress::redacted(response.url()),
+                    reason: "the HTTP client followed a redirect itself, past the URL policy; build it from \
+                             ClientConfig::http_builder"
+                        .to_owned(),
+                });
+            }
+            let location = response.headers().get(http::header::LOCATION).and_then(|v| v.to_str().ok());
+            let (true, Some(location)) = (response.status().is_redirection(), location) else {
+                break response;
+            };
+            url = egress::redirect_target(&self.config.url_policy, &request.method, &url, location, hops)
+                .map_err(|refused| OcpiError::UrlRefused { url: refused.target, reason: refused.reason })?;
+            hops += 1;
+            tracing::debug!(hop = hops, url = %egress::redacted(&url), "following a same-origin redirect");
+        };
         let status = response.status();
         let headers = response.headers().clone();
         span.record("http.response.status_code", status.as_u16());
@@ -294,7 +320,18 @@ pub fn check_outgoing<T: Validate>(value: &T, config: &ClientConfig) -> Result<(
 /// `reqwest` knows which it was; recovering that from the message string — which is what a hub
 /// would otherwise have to do to choose between `4002` and `4003` — is guesswork about another
 /// crate's formatting.
+///
+/// A refusal by the connect-time address check arrives as a connection error with the
+/// [`AddressRefused`](egress::AddressRefused) somewhere in its source chain; it is a policy
+/// decision, not a network failure, so it becomes [`OcpiError::UrlRefused`] and is not retried.
 fn transport_error(error: reqwest::Error) -> OcpiError {
+    let mut source = std::error::Error::source(&error);
+    while let Some(cause) = source {
+        if let Some(refused) = cause.downcast_ref::<egress::AddressRefused>() {
+            return OcpiError::UrlRefused { url: refused.host.clone(), reason: refused.to_string() };
+        }
+        source = cause.source();
+    }
     let message = strip_url(&error.to_string());
     if error.is_timeout() { OcpiError::Timeout(message) } else { OcpiError::Transport(message) }
 }
